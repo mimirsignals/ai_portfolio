@@ -774,83 +774,270 @@ server <- function(input, output, session) {
         }
     })
 
-    # Returns distribution (simplified for first portfolio)
+    # Returns distribution - showing all selected portfolios + benchmarks
     output$returns_distribution <- renderPlotly({
         data <- portfolio_data()
-        if (is.null(data) || length(data$portfolios) == 0) return(plotly_empty())
+        if (is.null(data)) return(plotly_empty())
 
-        # Use first portfolio for returns distribution
-        portfolio_info <- data$portfolios[[1]]
-        returns <- portfolio_info$portfolio_tbl %>%
-            arrange(date) %>%
-            mutate(daily_return = (investment / lag(investment) - 1) * 100) %>%
-            filter(!is.na(daily_return))
+        selected_portfolios <- input$selected_portfolios
+        if (length(selected_portfolios) == 0 && !input$show_sp500 && !input$show_btc) {
+            return(plotly_empty())
+        }
 
-        plot_ly(x = ~returns$daily_return, type = "histogram", nbinsx = 30) %>%
+        all_returns <- list()
+
+        # Add portfolio returns
+        for (portfolio_name in selected_portfolios) {
+            if (portfolio_name %in% names(data$portfolios)) {
+                portfolio_info <- data$portfolios[[portfolio_name]]
+                returns <- portfolio_info$portfolio_tbl %>%
+                    arrange(date) %>%
+                    mutate(
+                        daily_return = (investment / lag(investment) - 1) * 100,
+                        type = portfolio_name
+                    ) %>%
+                    filter(!is.na(daily_return)) %>%
+                    select(daily_return, type)
+
+                if (nrow(returns) > 0) {
+                    all_returns[[portfolio_name]] <- returns
+                }
+            }
+        }
+
+        # Add S&P 500 returns
+        if (input$show_sp500 && !is.null(data$benchmarks$sp500)) {
+            sp500_returns <- data$benchmarks$sp500 %>%
+                arrange(date) %>%
+                mutate(
+                    daily_return = (sp500 / lag(sp500) - 1) * 100,
+                    type = "S&P 500"
+                ) %>%
+                filter(!is.na(daily_return)) %>%
+                select(daily_return, type)
+
+            if (nrow(sp500_returns) > 0) {
+                all_returns[["S&P 500"]] <- sp500_returns
+            }
+        }
+
+        # Add Bitcoin returns
+        if (input$show_btc && !is.null(data$benchmarks$btc)) {
+            btc_returns <- data$benchmarks$btc %>%
+                arrange(date) %>%
+                mutate(
+                    daily_return = (btc / lag(btc) - 1) * 100,
+                    type = "Bitcoin"
+                ) %>%
+                filter(!is.na(daily_return)) %>%
+                select(daily_return, type)
+
+            if (nrow(btc_returns) > 0) {
+                all_returns[["Bitcoin"]] <- btc_returns
+            }
+        }
+
+        if (length(all_returns) == 0) return(plotly_empty())
+
+        # Combine all returns
+        combined_returns <- bind_rows(all_returns)
+
+        # Create overlaid histograms
+        plot_ly(combined_returns, x = ~daily_return, color = ~type,
+                type = "histogram", alpha = 0.7, nbinsx = 30) %>%
             layout(
                 title = "Distribution of Daily Returns",
                 xaxis = list(title = "Daily Return (%)"),
-                yaxis = list(title = "Frequency")
+                yaxis = list(title = "Frequency"),
+                barmode = "overlay"
             )
     })
 
-    # Rolling volatility (simplified)
+    # Rolling volatility - showing all selected portfolios + benchmarks
     output$volatility_plot <- renderPlotly({
         data <- portfolio_data()
-        if (is.null(data) || length(data$portfolios) == 0) return(plotly_empty())
+        if (is.null(data)) return(plotly_empty())
 
-        # Use first portfolio
-        portfolio_info <- data$portfolios[[1]]
-        returns <- portfolio_info$portfolio_tbl %>%
-            arrange(date) %>%
-            mutate(daily_return = investment / lag(investment) - 1) %>%
-            filter(!is.na(daily_return))
-
-        if (nrow(returns) > 30) {
-            volatility_data <- returns %>%
-                mutate(
-                    volatility = zoo::rollapply(daily_return, width = 30, FUN = sd,
-                                                fill = NA, align = "right") * sqrt(252) * 100,
-                    date = ymd(date)
-                ) %>%
-                filter(!is.na(volatility))
-
-            plot_ly(volatility_data, x = ~date, y = ~volatility, type = "scatter", mode = "lines") %>%
-                layout(
-                    title = "30-Day Rolling Volatility",
-                    xaxis = list(title = "Date"),
-                    yaxis = list(title = "Volatility (%)")
-                )
-        } else {
-            plotly_empty() %>% layout(title = "Not enough data for rolling volatility")
+        selected_portfolios <- input$selected_portfolios
+        if (length(selected_portfolios) == 0 && !input$show_sp500 && !input$show_btc) {
+            return(plotly_empty())
         }
+
+        all_volatility <- list()
+
+        # Add portfolio volatility
+        for (portfolio_name in selected_portfolios) {
+            if (portfolio_name %in% names(data$portfolios)) {
+                portfolio_info <- data$portfolios[[portfolio_name]]
+                returns <- portfolio_info$portfolio_tbl %>%
+                    arrange(date) %>%
+                    mutate(daily_return = investment / lag(investment) - 1) %>%
+                    filter(!is.na(daily_return))
+
+                if (nrow(returns) > 30) {
+                    volatility_data <- returns %>%
+                        mutate(
+                            volatility = zoo::rollapply(daily_return, width = 30, FUN = sd,
+                                                        fill = NA, align = "right") * sqrt(252) * 100,
+                            date = ymd(date),
+                            type = portfolio_name
+                        ) %>%
+                        filter(!is.na(volatility)) %>%
+                        select(date, volatility, type)
+
+                    if (nrow(volatility_data) > 0) {
+                        all_volatility[[portfolio_name]] <- volatility_data
+                    }
+                }
+            }
+        }
+
+        # Add S&P 500 volatility
+        if (input$show_sp500 && !is.null(data$benchmarks$sp500)) {
+            sp500_returns <- data$benchmarks$sp500 %>%
+                arrange(date) %>%
+                mutate(daily_return = sp500 / lag(sp500) - 1) %>%
+                filter(!is.na(daily_return))
+
+            if (nrow(sp500_returns) > 30) {
+                sp500_volatility <- sp500_returns %>%
+                    mutate(
+                        volatility = zoo::rollapply(daily_return, width = 30, FUN = sd,
+                                                    fill = NA, align = "right") * sqrt(252) * 100,
+                        date = ymd(date),
+                        type = "S&P 500"
+                    ) %>%
+                    filter(!is.na(volatility)) %>%
+                    select(date, volatility, type)
+
+                if (nrow(sp500_volatility) > 0) {
+                    all_volatility[["S&P 500"]] <- sp500_volatility
+                }
+            }
+        }
+
+        # Add Bitcoin volatility
+        if (input$show_btc && !is.null(data$benchmarks$btc)) {
+            btc_returns <- data$benchmarks$btc %>%
+                arrange(date) %>%
+                mutate(daily_return = btc / lag(btc) - 1) %>%
+                filter(!is.na(daily_return))
+
+            if (nrow(btc_returns) > 30) {
+                btc_volatility <- btc_returns %>%
+                    mutate(
+                        volatility = zoo::rollapply(daily_return, width = 30, FUN = sd,
+                                                    fill = NA, align = "right") * sqrt(252) * 100,
+                        date = ymd(date),
+                        type = "Bitcoin"
+                    ) %>%
+                    filter(!is.na(volatility)) %>%
+                    select(date, volatility, type)
+
+                if (nrow(btc_volatility) > 0) {
+                    all_volatility[["Bitcoin"]] <- btc_volatility
+                }
+            }
+        }
+
+        if (length(all_volatility) == 0) {
+            return(plotly_empty() %>% layout(title = "Not enough data for rolling volatility"))
+        }
+
+        # Combine all volatility data
+        combined_volatility <- bind_rows(all_volatility)
+
+        plot_ly(combined_volatility, x = ~date, y = ~volatility, color = ~type,
+                type = "scatter", mode = "lines") %>%
+            layout(
+                title = "30-Day Rolling Volatility",
+                xaxis = list(title = "Date"),
+                yaxis = list(title = "Volatility (%)")
+            )
     })
 
-    # Drawdown plot (simplified)
+    # Drawdown plot - showing all selected portfolios + benchmarks
     output$drawdown_plot <- renderPlotly({
         data <- portfolio_data()
-        if (is.null(data) || length(data$portfolios) == 0) return(plotly_empty())
+        if (is.null(data)) return(plotly_empty())
 
-        # Use first portfolio
-        portfolio_info <- data$portfolios[[1]]
-        returns <- portfolio_info$portfolio_tbl %>%
-            arrange(date) %>%
-            mutate(
-                daily_return = investment / lag(investment) - 1,
-                cumulative = cumprod(1 + coalesce(daily_return, 0)),
-                drawdown = (cumulative / cummax(cumulative) - 1) * 100,
-                date = ymd(date)
-            )
+        selected_portfolios <- input$selected_portfolios
+        if (length(selected_portfolios) == 0 && !input$show_sp500 && !input$show_btc) {
+            return(plotly_empty())
+        }
 
-        plot_ly(returns, x = ~date, y = ~drawdown, type = "scatter", mode = "lines",
-                fill = "tonexty", fillcolor = "rgba(31, 119, 180, 0.3)") %>%
+        all_drawdown <- list()
+
+        # Add portfolio drawdowns
+        for (portfolio_name in selected_portfolios) {
+            if (portfolio_name %in% names(data$portfolios)) {
+                portfolio_info <- data$portfolios[[portfolio_name]]
+                returns <- portfolio_info$portfolio_tbl %>%
+                    arrange(date) %>%
+                    mutate(
+                        daily_return = investment / lag(investment) - 1,
+                        cumulative = cumprod(1 + coalesce(daily_return, 0)),
+                        drawdown = (cumulative / cummax(cumulative) - 1) * 100,
+                        date = ymd(date),
+                        type = portfolio_name
+                    ) %>%
+                    select(date, drawdown, type)
+
+                if (nrow(returns) > 0) {
+                    all_drawdown[[portfolio_name]] <- returns
+                }
+            }
+        }
+
+        # Add S&P 500 drawdown
+        if (input$show_sp500 && !is.null(data$benchmarks$sp500)) {
+            sp500_drawdown <- data$benchmarks$sp500 %>%
+                arrange(date) %>%
+                mutate(
+                    daily_return = sp500 / lag(sp500) - 1,
+                    cumulative = cumprod(1 + coalesce(daily_return, 0)),
+                    drawdown = (cumulative / cummax(cumulative) - 1) * 100,
+                    date = ymd(date),
+                    type = "S&P 500"
+                ) %>%
+                select(date, drawdown, type)
+
+            if (nrow(sp500_drawdown) > 0) {
+                all_drawdown[["S&P 500"]] <- sp500_drawdown
+            }
+        }
+
+        # Add Bitcoin drawdown
+        if (input$show_btc && !is.null(data$benchmarks$btc)) {
+            btc_drawdown <- data$benchmarks$btc %>%
+                arrange(date) %>%
+                mutate(
+                    daily_return = btc / lag(btc) - 1,
+                    cumulative = cumprod(1 + coalesce(daily_return, 0)),
+                    drawdown = (cumulative / cummax(cumulative) - 1) * 100,
+                    date = ymd(date),
+                    type = "Bitcoin"
+                ) %>%
+                select(date, drawdown, type)
+
+            if (nrow(btc_drawdown) > 0) {
+                all_drawdown[["Bitcoin"]] <- btc_drawdown
+            }
+        }
+
+        if (length(all_drawdown) == 0) return(plotly_empty())
+
+        # Combine all drawdown data
+        combined_drawdown <- bind_rows(all_drawdown)
+
+        plot_ly(combined_drawdown, x = ~date, y = ~drawdown, color = ~type,
+                type = "scatter", mode = "lines") %>%
             layout(
                 title = "Drawdown Analysis",
                 xaxis = list(title = "Date"),
                 yaxis = list(title = "Drawdown (%)")
             )
     })
-
     # Portfolios management table
     output$portfolios_table <- DT::renderDataTable({
         portfolio_names <- names(portfolios$data)
