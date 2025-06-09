@@ -1,0 +1,12 @@
+name: ai_portfolio
+title: ai_portfolio
+username: mimirsignals
+account: mimirsignals
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 14905289
+bundleId: 10423786
+url: https://mimirsignals.shinyapps.io/ai_portfolio/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
