@@ -8,21 +8,6 @@ performanceUI <- function(id) {
   tagList(
     fluidRow(
       box(
-        title = "Portfolio Selection",
-        status = "info",
-        solidHeader = TRUE,
-        width = 12,
-        checkboxGroupInput(ns("selected_portfolios"), 
-                          "Select Portfolios to Display:",
-                          choices = c(), 
-                          selected = c(), 
-                          inline = TRUE),
-        checkboxInput(ns("show_sp500"), "Show S&P 500", value = TRUE),
-        checkboxInput(ns("show_btc"), "Show Bitcoin", value = TRUE)
-      )
-    ),
-    fluidRow(
-      box(
         title = "Portfolio Performance Comparison",
         status = "primary",
         solidHeader = TRUE,
@@ -52,29 +37,27 @@ performanceUI <- function(id) {
 performanceServer <- function(id, portfolios, portfolio_calculations) {
   moduleServer(id, function(input, output, session) {
     
-    # Update portfolio choices
-    observe({
-      choices <- names(portfolios())
-      selected <- if(length(choices) > 0) choices[1] else character(0)
-      
-      updateCheckboxGroupInput(session, "selected_portfolios",
-                               choices = choices,
-                               selected = selected)
+    # Get all available portfolio names
+    all_portfolio_names <- reactive({
+      names(portfolios())
     })
     
-    # Get selected portfolio data - FIX: Add portfolios argument
+    # Get selected portfolio data - automatically use ALL portfolios
     selected_data <- reactive({
-      req(input$selected_portfolios)
+      portfolio_names <- all_portfolio_names()
+      
+      # Return empty if no portfolios available
+      if (length(portfolio_names) == 0) {
+        return(NULL)
+      }
       
       portfolio_calculations(
-        portfolios = portfolios(),           # ADD THIS LINE
-        selected_portfolios = input$selected_portfolios,
-        show_sp500 = input$show_sp500,
-        show_btc = input$show_btc
+        portfolios = portfolios(),
+        selected_portfolios = portfolio_names,  # Use ALL portfolios
+        show_sp500 = TRUE,  # Always show S&P 500
+        show_btc = TRUE     # Always show Bitcoin
       )
     })
-    
-    # Rest of the function remains the same...
     
     # Main performance plot
     output$performance_plot <- renderPlotly({
@@ -98,7 +81,7 @@ performanceServer <- function(id, portfolios, portfolio_calculations) {
       data <- selected_data()
       if (is.null(data)) return(NULL)
       
-      create_value_boxes(data, input$show_sp500, input$show_btc)
+      create_value_boxes(data, TRUE, TRUE)  # Always show both benchmarks
     })
     
     # Performance metrics table
@@ -111,12 +94,12 @@ performanceServer <- function(id, portfolios, portfolio_calculations) {
       DT::datatable(metrics, options = list(dom = 't'))
     })
     
-    # Return selected portfolios for use by other modules
+    # Return selections for use by other modules (now always all portfolios + benchmarks)
     reactive({
       list(
-        selected = input$selected_portfolios,
-        show_sp500 = input$show_sp500,
-        show_btc = input$show_btc
+        selected = all_portfolio_names(),  # Always return all portfolio names
+        show_sp500 = TRUE,                 # Always show S&P 500
+        show_btc = TRUE                    # Always show Bitcoin
       )
     })
   })
@@ -167,6 +150,7 @@ prepare_performance_plot_data <- function(data) {
   
   bind_rows(all_data)
 }
+
 
 #' Create value boxes for portfolios and benchmarks
 create_value_boxes <- function(data, show_sp500, show_btc) {
