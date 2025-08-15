@@ -62,16 +62,19 @@ performanceServer <- function(id, portfolios, portfolio_calculations) {
                                selected = selected)
     })
     
-    # Get selected portfolio data
+    # Get selected portfolio data - FIX: Add portfolios argument
     selected_data <- reactive({
       req(input$selected_portfolios)
       
       portfolio_calculations(
+        portfolios = portfolios(),           # ADD THIS LINE
         selected_portfolios = input$selected_portfolios,
         show_sp500 = input$show_sp500,
         show_btc = input$show_btc
       )
     })
+    
+    # Rest of the function remains the same...
     
     # Main performance plot
     output$performance_plot <- renderPlotly({

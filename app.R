@@ -11,9 +11,7 @@ ui <- dashboardPage(
     sidebarMenu(
       menuItem("Performance Overview", tabName = "performance", icon = icon("chart-line")),
       menuItem("Risk Metrics", tabName = "risk", icon = icon("exclamation-triangle")),
-      menuItem("Holdings", tabName = "holdings", icon = icon("pie-chart")),
-      menuItem("Create Portfolio", tabName = "create", icon = icon("plus-circle")),
-      menuItem("Manage Portfolios", tabName = "manage", icon = icon("cogs"))
+      menuItem("Holdings", tabName = "holdings", icon = icon("pie-chart"))
     )
   ),
   
@@ -76,15 +74,15 @@ server <- function(input, output, session) {
                    portfolio_calc,
                    performance_selections)
     
-    # Portfolio creation module
-    portfolioCreateServer("create", 
-                         data_manager,
-                         portfolios_reactive)
+    # Comment out missing modules until they are implemented
+    # portfolioCreateServer("create", 
+    #                      data_manager,
+    #                      portfolios_reactive)
+    # 
+    # portfolioManageServer("manage", 
+    #                      data_manager,
+    #                      portfolios_reactive)
     
-    # Portfolio management module
-    portfolioManageServer("manage", 
-                         data_manager,
-                         portfolios_reactive)
   }, error = function(e) {
     showNotification(
       paste("Error initializing modules:", e$message),
