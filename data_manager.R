@@ -1,13 +1,17 @@
-# R/data_manager.R - Portfolio Data Manager using R6
+# R/data_manager.R - Portfolio Data Manager using R6 (Extended with Rebalancing)
 
 DataManager <- R6::R6Class("DataManager",
   public = list(
     #' Initialize DataManager
     #' @param csv_path Path to CSV file for persistence
-    initialize = function(csv_path = "portfolios_data.csv") {
+    #' @param history_path Path to rebalancing history CSV
+    initialize = function(csv_path = "portfolios_data.csv", 
+                         history_path = "rebalancing_history.csv") {
       private$csv_path <- csv_path
+      private$history_path <- history_path
       private$ensure_data_directory()
       self$load_portfolios()
+      self$load_rebalancing_history()
       
       # Create default portfolio if none exist
       if (length(private$portfolios) == 0) {
@@ -67,6 +71,15 @@ DataManager <- R6::R6Class("DataManager",
         weights = weights,
         created_at = Sys.time(),
         modified_at = Sys.time()
+      )
+      
+      # Save initial state to rebalancing history
+      self$save_rebalancing_action(
+        portfolio_name = name,
+        new_symbols = symbols,
+        new_weights = weights,
+        action_type = "portfolio_creation",
+        notes = "Initial portfolio creation"
       )
       
       private$save_portfolios()
@@ -160,6 +173,103 @@ DataManager <- R6::R6Class("DataManager",
       names(private$portfolios)
     },
     
+    #' Save rebalancing action
+    #' @param portfolio_name Portfolio name
+    #' @param new_symbols New symbol list
+    #' @param new_weights New weights
+    #' @param action_type Type of action
+    #' @param notes Optional notes
+    #' @return TRUE if successful
+    save_rebalancing_action = function(portfolio_name, new_symbols, new_weights, 
+                                     action_type = "rebalance", notes = "") {
+      tryCatch({
+        new_record <- data.frame(
+          portfolio_name = portfolio_name,
+          rebalance_date = as.character(Sys.Date()),
+          rebalance_time = as.character(Sys.time()),
+          action_type = action_type,
+          symbols = paste(new_symbols, collapse = "|"),
+          weights = paste(round(new_weights, 6), collapse = "|"),
+          notes = notes,
+          stringsAsFactors = FALSE
+        )
+        
+        private$rebalancing_history <- rbind(private$rebalancing_history, new_record)
+        private$save_rebalancing_history()
+        
+        message(paste("Rebalancing action saved for", portfolio_name))
+        return(TRUE)
+        
+      }, error = function(e) {
+        warning(paste("Error saving rebalancing action:", e$message))
+        return(FALSE)
+      })
+    },
+    
+    #' Get rebalancing history for a portfolio
+    #' @param portfolio_name Portfolio name
+    #' @return Data frame with rebalancing history
+    get_rebalancing_history = function(portfolio_name) {
+      if (nrow(private$rebalancing_history) == 0) {
+        return(data.frame())
+      }
+      
+      history <- private$rebalancing_history %>%
+        filter(portfolio_name == !!portfolio_name) %>%
+        arrange(desc(rebalance_date), desc(rebalance_time))
+      
+      return(history)
+    },
+    
+    #' Get historical portfolio state
+    #' @param portfolio_name Portfolio name
+    #' @param target_date Target date
+    #' @return List with symbols and weights at that date
+    get_historical_portfolio_state = function(portfolio_name, target_date) {
+      history <- self$get_rebalancing_history(portfolio_name)
+      
+      if (nrow(history) == 0) {
+        return(NULL)
+      }
+      
+      # Find the most recent rebalancing before or on target_date
+      target_date <- as.Date(target_date)
+      valid_records <- history %>%
+        filter(as.Date(rebalance_date) <= target_date) %>%
+        arrange(desc(rebalance_date), desc(rebalance_time))
+      
+      if (nrow(valid_records) == 0) {
+        return(NULL)
+      }
+      
+      # Get the most recent record
+      record <- valid_records[1, ]
+      
+      symbols <- strsplit(record$symbols, "\\|")[[1]]
+      weights <- as.numeric(strsplit(record$weights, "\\|")[[1]])
+      
+      return(list(
+        symbols = symbols,
+        weights = weights,
+        date = record$rebalance_date,
+        action_type = record$action_type,
+        notes = record$notes
+      ))
+    },
+    
+    #' Get all rebalancing dates for a portfolio
+    #' @param portfolio_name Portfolio name
+    #' @return Character vector of dates
+    get_rebalancing_dates = function(portfolio_name) {
+      history <- self$get_rebalancing_history(portfolio_name)
+      
+      if (nrow(history) == 0) {
+        return(character(0))
+      }
+      
+      unique(history$rebalance_date)
+    },
+    
     #' Load portfolios from CSV
     load_portfolios = function() {
       if (file.exists(private$csv_path)) {
@@ -215,6 +325,40 @@ DataManager <- R6::R6Class("DataManager",
       }
     },
     
+    #' Load rebalancing history
+    load_rebalancing_history = function() {
+      if (file.exists(private$history_path)) {
+        tryCatch({
+          private$rebalancing_history <- read.csv(private$history_path, stringsAsFactors = FALSE)
+          message(paste("Loaded", nrow(private$rebalancing_history), "rebalancing records"))
+        }, error = function(e) {
+          warning(paste("Error loading rebalancing history:", e$message))
+          private$rebalancing_history <- data.frame(
+            portfolio_name = character(),
+            rebalance_date = character(),
+            rebalance_time = character(),
+            action_type = character(),
+            symbols = character(),
+            weights = character(),
+            notes = character(),
+            stringsAsFactors = FALSE
+          )
+        })
+      } else {
+        message("No existing rebalancing history file found")
+        private$rebalancing_history <- data.frame(
+          portfolio_name = character(),
+          rebalance_date = character(),
+          rebalance_time = character(),
+          action_type = character(),
+          symbols = character(),
+          weights = character(),
+          notes = character(),
+          stringsAsFactors = FALSE
+        )
+      }
+    },
+    
     #' Get portfolio summary
     #' @return Data frame with portfolio summaries
     get_portfolio_summary = function() {
@@ -236,6 +380,14 @@ DataManager <- R6::R6Class("DataManager",
           paste0("$", formatC(private$portfolios[[name]]$total_investment,
                              format = "f", digits = 0, big.mark = ","))
         }),
+        Last_Rebalance = sapply(portfolio_names, function(name) {
+          history <- self$get_rebalancing_history(name)
+          if (nrow(history) > 0) {
+            max(history$rebalance_date)
+          } else {
+            "Never"
+          }
+        }),
         stringsAsFactors = FALSE
       )
     }
@@ -243,7 +395,9 @@ DataManager <- R6::R6Class("DataManager",
   
   private = list(
     csv_path = NULL,
+    history_path = NULL,
     portfolios = list(),
+    rebalancing_history = data.frame(),
     
     #' Ensure data directory exists
     ensure_data_directory = function() {
@@ -297,6 +451,16 @@ DataManager <- R6::R6Class("DataManager",
       })
     },
     
+    #' Save rebalancing history
+    save_rebalancing_history = function() {
+      tryCatch({
+        write.csv(private$rebalancing_history, private$history_path, row.names = FALSE)
+        message(paste("Rebalancing history saved to", private$history_path))
+      }, error = function(e) {
+        warning(paste("Error saving rebalancing history:", e$message))
+      })
+    },
+    
     #' Create default portfolio
     create_default_portfolio = function() {
       # Use APP_CONFIG if available, otherwise use fallback values
@@ -318,13 +482,24 @@ DataManager <- R6::R6Class("DataManager",
         365
       }
       
+      weights <- rep(1/length(default_symbols), length(default_symbols))
+      
       private$portfolios[["Default Portfolio"]] <- list(
         symbols = default_symbols,
         start_date = Sys.Date() - default_start_offset,
         total_investment = default_investment,
-        weights = rep(1/length(default_symbols), length(default_symbols)),
+        weights = weights,
         created_at = Sys.time(),
         modified_at = Sys.time()
+      )
+      
+      # Save initial state to history
+      self$save_rebalancing_action(
+        portfolio_name = "Default Portfolio",
+        new_symbols = default_symbols,
+        new_weights = weights,
+        action_type = "portfolio_creation",
+        notes = "Default portfolio creation"
       )
       
       private$save_portfolios()
