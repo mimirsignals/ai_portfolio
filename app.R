@@ -19,20 +19,11 @@ ui <- dashboardPage(
     # Add shinyjs if available
     if (exists("useShinyjs")) { useShinyjs() },
     
-    # Custom CSS for better styling
+    # Custom CSS
     tags$head(
       tags$style(HTML("
         .content-wrapper, .right-side {
           background-color: #f4f4f4;
-        }
-        .box {
-          border-radius: 5px;
-        }
-        .current-portfolio {
-          border: 2px solid #3c8dbc;
-        }
-        .historical-portfolio {
-          border: 2px solid #f39c12;
         }
         .refresh-button {
           position: fixed;
@@ -61,43 +52,45 @@ ui <- dashboardPage(
 # Server Definition
 server <- function(input, output, session) {
   
-  # Initialize data manager for Excel-based portfolios
-  data_manager <- tryCatch({
-    ExcelPortfolioManager$new(excel_path = "portfolio.xlsx")
-  }, error = function(e) {
-    showNotification(
-      paste("Error initializing portfolio manager:", e$message),
-      type = "error",
-      duration = 10
-    )
-    return(NULL)
-  })
-  
-  # Reactive wrapper for portfolio data
+  # Simple reactive for portfolio data - just read Excel file
   portfolios_reactive <- reactive({
-    if (is.null(data_manager)) {
+    tryCatch({
+      portfolios <- read_portfolio_excel("portfolio.xlsx")
+      
+      if (length(portfolios) == 0) {
+        showNotification(
+          "No portfolio data found. Please check your portfolio.xlsx file.",
+          type = "warning"
+        )
+      }
+      
+      return(portfolios)
+    }, error = function(e) {
+      showNotification(
+        paste("Error reading portfolio.xlsx:", e$message),
+        type = "error"
+      )
       return(list())
-    }
-    data_manager$get_all_portfolios()
+    })
   })
   
-  # Shared reactive for portfolio calculations
-  portfolio_calc <- portfolioCalculator()
+  # Use simple portfolio calculator
+  portfolio_calc <- simple_portfolio_calculator
   
   # Initialize modules
   tryCatch({
-    # Performance module - returns selection info for other modules
+    # Performance module
     performance_selections <- performanceServer("performance", 
                                                portfolios_reactive, 
                                                portfolio_calc)
     
-    # Risk module uses selections from performance module
+    # Risk module
     riskServer("risk", 
                portfolios_reactive, 
                portfolio_calc,
                performance_selections)
     
-    # Holdings module uses selections from performance module
+    # Holdings module
     holdingsServer("holdings", 
                    portfolios_reactive,
                    portfolio_calc,
@@ -106,19 +99,23 @@ server <- function(input, output, session) {
   }, error = function(e) {
     showNotification(
       paste("Error initializing modules:", e$message),
-      type = "error",
-      duration = 10
+      type = "error"
     )
   })
   
-  # Refresh data action
+  # Refresh data - just invalidate the reactive
   observeEvent(input$refresh_data, {
-    if (!is.null(data_manager)) {
-      data_manager$reload_portfolio_data()
-      showNotification("Portfolio data refreshed successfully!", type = "message")
-    } else {
-      showNotification("Data manager not available", type = "error")
-    }
+    # Force re-read of Excel file
+    portfolios_reactive <- reactive({
+      tryCatch({
+        portfolios <- read_portfolio_excel("portfolio.xlsx")
+        showNotification("Portfolio data refreshed!", type = "message")
+        return(portfolios)
+      }, error = function(e) {
+        showNotification(paste("Error refreshing:", e$message), type = "error")
+        return(list())
+      })
+    })
   })
 }
 

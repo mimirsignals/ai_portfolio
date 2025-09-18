@@ -56,10 +56,10 @@ ExcelPortfolioManager <- R6Class("ExcelPortfolioManager",
           select(date, symbol, weight) %>%
           mutate(
             date = as.Date(date),
-            symbol = toupper(trimws(symbol)),
+            symbol = toupper(trimws(as.character(symbol))),
             weight = as.numeric(gsub(",", ".", as.character(weight)))  # Handle European decimal format
           ) %>%
-          filter(!is.na(date), !is.na(symbol), !is.na(weight), weight > 0) %>%
+          filter(!is.na(date), !is.na(symbol), !is.na(weight), weight > 0, is.finite(weight)) %>%
           arrange(date, symbol)
         
         private$last_modified <- current_modified
@@ -188,3 +188,170 @@ ExcelPortfolioManager <- R6Class("ExcelPortfolioManager",
     }
   )
 )
+
+# Bridge Portfolio Calculator that works with Excel data
+bridgedPortfolioCalculator <- function() {
+  function(portfolios, selected_portfolios, show_sp500 = FALSE, show_btc = FALSE) {
+    
+    if (length(portfolios) == 0 || length(selected_portfolios) == 0) {
+      return(list(portfolios = list(), sp500 = NULL, bitcoin = NULL))
+    }
+    
+    result <- list(portfolios = list(), sp500 = NULL, bitcoin = NULL)
+    
+    # Process each selected portfolio
+    for (portfolio_name in selected_portfolios) {
+      if (portfolio_name %in% names(portfolios)) {
+        portfolio_info <- portfolios[[portfolio_name]]
+        
+        tryCatch({
+          # Validate portfolio info
+          if (is.null(portfolio_info$symbols) || is.null(portfolio_info$weights) || 
+              is.null(portfolio_info$start_date) || is.null(portfolio_info$total_investment)) {
+            warning(paste("Invalid portfolio data for", portfolio_name))
+            next
+          }
+          
+          # Ensure numeric types
+          portfolio_info$weights <- as.numeric(portfolio_info$weights)
+          portfolio_info$total_investment <- as.numeric(portfolio_info$total_investment)
+          portfolio_info$start_date <- as.Date(portfolio_info$start_date)
+          
+          # Validate weights
+          if (any(is.na(portfolio_info$weights)) || any(!is.finite(portfolio_info$weights))) {
+            warning(paste("Invalid weights for portfolio", portfolio_name))
+            next
+          }
+          
+          # Get portfolio performance using the existing function
+          portfolio_data <- calculate_portfolio_performance(
+            symbols = portfolio_info$symbols,
+            weights = portfolio_info$weights,
+            start_date = portfolio_info$start_date,
+            total_investment = portfolio_info$total_investment,
+            portfolio_name = portfolio_name
+          )
+          
+          if (!is.null(portfolio_data) && !is.null(portfolio_data$portfolio_tbl) && 
+              nrow(portfolio_data$portfolio_tbl) > 0) {
+            
+            # Convert to format expected by modules
+            dates <- as.Date(portfolio_data$portfolio_tbl$date)
+            values <- as.numeric(portfolio_data$portfolio_tbl$investment)
+            
+            # Remove any non-finite values
+            valid_indices <- is.finite(values) & !is.na(dates)
+            dates <- dates[valid_indices]
+            values <- values[valid_indices]
+            
+            if (length(dates) == 0 || length(values) == 0) {
+              warning(paste("No valid data for portfolio", portfolio_name))
+              next
+            }
+            
+            # Calculate cumulative returns
+            initial_value <- as.numeric(portfolio_info$total_investment)
+            if (is.na(initial_value) || initial_value <= 0) {
+              warning(paste("Invalid initial value for portfolio", portfolio_name))
+              next
+            }
+            
+            cumulative_returns <- (values / initial_value) - 1
+            
+            # Validate cumulative returns
+            if (any(!is.finite(cumulative_returns))) {
+              warning(paste("Invalid returns calculated for portfolio", portfolio_name))
+              next
+            }
+            
+            # Clean individual stocks data
+            clean_individual_stocks <- NULL
+            if (!is.null(portfolio_data$individual_stocks)) {
+              clean_individual_stocks <- portfolio_data$individual_stocks %>%
+                mutate(
+                  date = as.Date(date),
+                  investment = as.numeric(investment),
+                  daily_return = as.numeric(daily_return),
+                  cumulative_return = as.numeric(cumulative_return)
+                ) %>%
+                filter(is.finite(investment), is.finite(daily_return), is.finite(cumulative_return))
+            }
+            
+            result$portfolios[[portfolio_name]] <- list(
+              dates = dates,
+              cumulative_returns = cumulative_returns,
+              individual_stocks = clean_individual_stocks,
+              portfolio_tbl = portfolio_data$portfolio_tbl
+            )
+          }
+        }, error = function(e) {
+          warning(paste("Error calculating portfolio", portfolio_name, ":", e$message))
+        })
+      }
+    }
+    
+    # Add benchmark data if requested and we have valid portfolios
+    if ((show_sp500 || show_btc) && length(result$portfolios) > 0) {
+      # Find earliest start date
+      earliest_date <- min(sapply(selected_portfolios, function(name) {
+        if (name %in% names(portfolios) && !is.null(portfolios[[name]]$start_date)) {
+          as.Date(portfolios[[name]]$start_date)
+        } else {
+          Sys.Date()
+        }
+      }))
+      
+      if (show_sp500) {
+        tryCatch({
+          sp500_raw <- fetch_benchmark_data("^GSPC", earliest_date, initial_value = 10000)
+          if (!is.null(sp500_raw) && nrow(sp500_raw) > 0) {
+            # Clean benchmark data
+            sp500_clean <- sp500_raw %>%
+              mutate(
+                date = as.Date(date),
+                value = as.numeric(value)
+              ) %>%
+              filter(is.finite(value), !is.na(date))
+            
+            if (nrow(sp500_clean) > 0) {
+              # Convert to expected format
+              result$sp500 <- list(
+                dates = sp500_clean$date,
+                cumulative_returns = (sp500_clean$value / 10000) - 1
+              )
+            }
+          }
+        }, error = function(e) {
+          warning(paste("Error fetching S&P 500 data:", e$message))
+        })
+      }
+      
+      if (show_btc) {
+        tryCatch({
+          btc_raw <- fetch_benchmark_data("BTC-USD", earliest_date, initial_value = 10000)
+          if (!is.null(btc_raw) && nrow(btc_raw) > 0) {
+            # Clean benchmark data
+            btc_clean <- btc_raw %>%
+              mutate(
+                date = as.Date(date),
+                value = as.numeric(value)
+              ) %>%
+              filter(is.finite(value), !is.na(date))
+            
+            if (nrow(btc_clean) > 0) {
+              # Convert to expected format
+              result$bitcoin <- list(
+                dates = btc_clean$date,
+                cumulative_returns = (btc_clean$value / 10000) - 1
+              )
+            }
+          }
+        }, error = function(e) {
+          warning(paste("Error fetching Bitcoin data:", e$message))
+        })
+      }
+    }
+    
+    return(result)
+  }
+}
