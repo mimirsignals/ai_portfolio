@@ -1,273 +1,219 @@
-# R/utils_data.R - Data Fetching and Processing Utilities
+# utils_data.R - Fixed Portfolio Performance Calculation
 
-#' Fetch stock data for multiple symbols
-#' @param symbols Character vector of stock symbols
-#' @param start_date Start date for data
-#' @param end_date End date for data (default: today + 1)
-#' @param auto_assign Whether to auto-assign to global environment
-#' @return List of data frames with stock data
-fetch_stock_data <- function(symbols, start_date, end_date = today() + 1, auto_assign = FALSE) {
-  data_list <- list()
-  successful_symbols <- c()
-  failed_symbols <- c()
+library(quantmod)
+library(dplyr)
+library(lubridate)
+
+#' Calculate portfolio performance with proper error handling
+#' @param symbols Vector of stock symbols
+#' @param weights Vector of portfolio weights
+#' @param start_date Start date for calculation
+#' @param total_investment Total investment amount
+#' @param portfolio_name Name of portfolio (for identification)
+#' @return List containing portfolio_tbl and individual_stocks data
+calculate_portfolio_performance <- function(symbols, weights, start_date, total_investment, portfolio_name = "Portfolio") {
   
-  for (symbol in symbols) {
-    tryCatch({
-      # Fetch data using quantmod
-      stock_data <- getSymbols(symbol,
-                              from = start_date,
-                              to = end_date,
-                              auto.assign = auto_assign)
-      
-      # Process and store
-      processed_data <- stock_data %>%
-        as.data.frame() %>%
-        rownames_to_column("date") %>%
-        as_tibble() %>%
-        select(date, contains("Close")) %>%
-        set_names("date", "price") %>%
-        mutate(
-          symbol = symbol,
-          date = ymd(date)
-        )
-      
-      data_list[[symbol]] <- processed_data
-      successful_symbols <- c(successful_symbols, symbol)
-      
-    }, error = function(e) {
-      warning(paste("Failed to fetch data for", symbol, ":", e$message))
-      failed_symbols <- c(failed_symbols, symbol)
-    })
+  # Input validation
+  if (length(symbols) == 0 || length(weights) == 0) {
+    warning("Empty symbols or weights provided")
+    return(NULL)
   }
   
-  # Return results with metadata
-  list(
-    data = data_list,
-    successful = successful_symbols,
-    failed = failed_symbols,
-    success_rate = length(successful_symbols) / length(symbols)
-  )
-}
-
-#' Fetch benchmark data (S&P 500, Bitcoin, etc.)
-#' @param benchmark_symbol Benchmark symbol (e.g., "^GSPC", "BTC-USD")
-#' @param start_date Start date for data
-#' @param end_date End date for data
-#' @param initial_value Initial investment value for normalization
-#' @return Data frame with benchmark data
-fetch_benchmark_data <- function(benchmark_symbol, start_date, 
-                                end_date = today() + 1, initial_value = 10000) {
+  if (length(symbols) != length(weights)) {
+    warning("Symbols and weights have different lengths")
+    return(NULL)
+  }
+  
+  # Ensure numeric types
+  weights <- as.numeric(weights)
+  total_investment <- as.numeric(total_investment)
+  start_date <- as.Date(start_date)
+  
+  # Validate inputs
+  if (any(is.na(weights)) || any(weights < 0) || sum(weights) == 0) {
+    warning("Invalid weights provided")
+    return(NULL)
+  }
+  
+  if (is.na(total_investment) || total_investment <= 0) {
+    warning("Invalid total investment amount")
+    return(NULL)
+  }
+  
+  if (is.na(start_date)) {
+    warning("Invalid start date")
+    return(NULL)
+  }
+  
+  # Normalize weights
+  weights <- weights / sum(weights)
+  
   tryCatch({
-    # Fetch benchmark data
-    benchmark_data <- getSymbols(benchmark_symbol,
-                                from = start_date,
-                                to = end_date,
-                                auto.assign = FALSE)
+    # Get stock data
+    stock_data <- fetch_stock_data(symbols, start_date)
     
-    # Process data
-    processed_data <- benchmark_data %>%
-      as.data.frame() %>%
-      rownames_to_column("date") %>%
-      as_tibble() %>%
-      select(date, contains("Close")) %>%
-      set_names("date", "price") %>%
-      mutate(
-        date = ymd(date),
-        returns = price / lag(price) - 1,
-        returns = if_else(row_number() == 1, 0, returns),
-        cumulative_return = cumprod(1 + returns),
-        value = initial_value * cumulative_return
-      ) %>%
-      select(date, price, returns, value)
+    if (is.null(stock_data) || nrow(stock_data) == 0) {
+      warning("No stock data available")
+      return(NULL)
+    }
     
-    # Add benchmark name column
-    benchmark_name <- switch(benchmark_symbol,
-                           "^GSPC" = "sp500",
-                           "BTC-USD" = "btc",
-                           "^DJI" = "dow",
-                           "^IXIC" = "nasdaq",
-                           tolower(gsub("[^A-Za-z]", "", benchmark_symbol)))
+    # Calculate portfolio performance
+    portfolio_performance <- calculate_weighted_portfolio(stock_data, symbols, weights, total_investment)
     
-    names(processed_data)[4] <- benchmark_name
+    if (is.null(portfolio_performance)) {
+      warning("Portfolio calculation failed")
+      return(NULL)
+    }
     
-    return(processed_data)
+    return(list(
+      portfolio_tbl = portfolio_performance$portfolio_tbl,
+      individual_stocks = portfolio_performance$individual_stocks
+    ))
     
   }, error = function(e) {
-    warning(paste("Failed to fetch benchmark data for", benchmark_symbol, ":", e$message))
+    warning(paste("Error calculating portfolio performance:", e$message))
     return(NULL)
   })
 }
 
-#' Combine stock data from multiple sources
-#' @param data_list List of data frames with stock data
-#' @return Combined data frame
-combine_stock_data <- function(data_list) {
-  if (length(data_list) == 0) {
-    return(data.frame())
+#' Fetch stock data for given symbols
+#' @param symbols Vector of stock symbols
+#' @param start_date Start date for data
+#' @return Data frame with stock data
+fetch_stock_data <- function(symbols, start_date) {
+  
+  # Ensure we have valid symbols
+  symbols <- unique(symbols[!is.na(symbols) & symbols != ""])
+  
+  if (length(symbols) == 0) {
+    return(NULL)
   }
   
-  # Filter out NULL entries
-  data_list <- data_list[!sapply(data_list, is.null)]
+  # Set reasonable end date (today)
+  end_date <- Sys.Date()
   
-  if (length(data_list) == 0) {
-    return(data.frame())
+  # Ensure start_date is reasonable
+  if (start_date > end_date) {
+    start_date <- end_date - 365  # Default to 1 year back
   }
   
-  # Combine all data frames
-  combined_data <- bind_rows(data_list)
-  
-  return(combined_data)
-}
-
-#' Calculate returns for stock data
-#' @param stock_data Data frame with price data
-#' @param group_by Column to group by (e.g., "symbol")
-#' @return Data frame with returns added
-calculate_returns <- function(stock_data, group_by = "symbol") {
-  stock_data %>%
-    arrange(!!sym(group_by), date) %>%
-    group_by(!!sym(group_by)) %>%
-    mutate(
-      daily_return = price / lag(price) - 1,
-      daily_return = if_else(row_number() == 1, 0, daily_return),
-      cumulative_return = cumprod(1 + daily_return),
-      log_return = log(price / lag(price)),
-      log_return = if_else(row_number() == 1, 0, log_return)
-    ) %>%
-    ungroup()
-}
-
-#' Fetch market cap data for stocks (simplified version)
-#' @param symbols Character vector of stock symbols
-#' @return Data frame with market cap data
-fetch_market_cap_data <- function(symbols) {
-  # This is a simplified version - in production, you'd use a real API
-  # For now, return mock data or equal weights
-  
-  market_caps <- data.frame(
-    symbol = symbols,
-    market_cap = runif(length(symbols), 1e9, 1e12),  # Mock data
-    stringsAsFactors = FALSE
-  )
-  
-  market_caps %>%
-    mutate(
-      weight = market_cap / sum(market_cap)
-    )
-}
-
-#' Validate stock symbols
-#' @param symbols Character vector of stock symbols to validate
-#' @param check_date Date to check for data availability
-#' @return List with validation results
-validate_symbols <- function(symbols, check_date = Sys.Date() - 30) {
-  validation_results <- list()
+  all_stock_data <- data.frame()
   
   for (symbol in symbols) {
     tryCatch({
-      # Try to fetch recent data
-      test_data <- getSymbols(symbol,
-                             from = check_date,
-                             to = Sys.Date(),
-                             auto.assign = FALSE)
+      # Fetch data using quantmod
+      stock_xts <- getSymbols(symbol, 
+                             from = start_date, 
+                             to = end_date, 
+                             auto.assign = FALSE,
+                             warnings = FALSE)
       
-      # Check if we got any data
-      if (nrow(test_data) > 0) {
-        validation_results[[symbol]] <- list(
-          valid = TRUE,
-          message = "Valid",
-          data_points = nrow(test_data),
-          last_price = as.numeric(tail(Cl(test_data), 1))
-        )
-      } else {
-        validation_results[[symbol]] <- list(
-          valid = FALSE,
-          message = "No data available",
-          data_points = 0,
-          last_price = NA
-        )
-      }
-    }, error = function(e) {
-      validation_results[[symbol]] <- list(
-        valid = FALSE,
-        message = paste("Error:", e$message),
-        data_points = 0,
-        last_price = NA
-      )
-    })
-  }
-  
-  return(validation_results)
-}
-
-#' Clean and prepare data for analysis
-#' @param data Raw data frame
-#' @param remove_na Whether to remove NA values
-#' @param fill_method Method to fill missing values ("forward", "backward", "interpolate")
-#' @return Cleaned data frame
-clean_data <- function(data, remove_na = TRUE, fill_method = "forward") {
-  if (nrow(data) == 0) return(data)
-  
-  # Remove duplicates
-  data <- data %>% distinct()
-  
-  # Handle missing values
-  if (remove_na) {
-    data <- data %>% filter(complete.cases(.))
-  } else if (fill_method == "forward") {
-    data <- data %>% tidyr::fill(everything(), .direction = "down")
-  } else if (fill_method == "backward") {
-    data <- data %>% tidyr::fill(everything(), .direction = "up")
-  } else if (fill_method == "interpolate") {
-    # Linear interpolation for numeric columns
-    numeric_cols <- names(data)[sapply(data, is.numeric)]
-    for (col in numeric_cols) {
-      data[[col]] <- zoo::na.approx(data[[col]], na.rm = FALSE)
-    }
-  }
-  
-  return(data)
-}
-
-#' Get latest price for stocks
-#' @param symbols Character vector of stock symbols
-#' @return Data frame with latest prices
-get_latest_prices <- function(symbols) {
-  prices <- data.frame(
-    symbol = character(),
-    latest_price = numeric(),
-    change = numeric(),
-    change_pct = numeric(),
-    timestamp = as.POSIXct(character()),
-    stringsAsFactors = FALSE
-  )
-  
-  for (symbol in symbols) {
-    tryCatch({
-      # Get last 2 days of data
-      recent_data <- getSymbols(symbol,
-                               from = Sys.Date() - 5,
-                               to = Sys.Date() + 1,
-                               auto.assign = FALSE)
-      
-      if (nrow(recent_data) >= 2) {
-        close_prices <- Cl(recent_data)
-        latest_price <- as.numeric(tail(close_prices, 1))
-        prev_price <- as.numeric(tail(close_prices, 2)[1])
-        
-        prices <- rbind(prices, data.frame(
+      if (!is.null(stock_xts) && nrow(stock_xts) > 0) {
+        # Convert to data frame
+        stock_df <- data.frame(
+          date = index(stock_xts),
           symbol = symbol,
-          latest_price = latest_price,
-          change = latest_price - prev_price,
-          change_pct = (latest_price / prev_price - 1) * 100,
-          timestamp = Sys.time(),
+          adjusted_price = as.numeric(Ad(stock_xts)),
           stringsAsFactors = FALSE
-        ))
+        )
+        
+        # Filter out invalid prices
+        stock_df <- stock_df %>%
+          filter(!is.na(adjusted_price), adjusted_price > 0, !is.na(date))
+        
+        if (nrow(stock_df) > 0) {
+          all_stock_data <- rbind(all_stock_data, stock_df)
+        }
       }
     }, error = function(e) {
-      warning(paste("Could not fetch latest price for", symbol))
+      warning(paste("Failed to fetch data for", symbol, ":", e$message))
     })
+    
+    # Small delay to be nice to data providers
+    Sys.sleep(0.1)
   }
   
-  return(prices)
+  if (nrow(all_stock_data) == 0) {
+    warning("No valid stock data retrieved")
+    return(NULL)
+  }
+  
+  return(all_stock_data)
+}
+
+#' Calculate weighted portfolio performance
+#' @param stock_data Data frame with stock data
+#' @param symbols Vector of symbols
+#' @param weights Vector of weights
+#' @param total_investment Total investment amount
+#' @return List with portfolio and individual stock performance
+calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_investment) {
+  
+  if (is.null(stock_data) || nrow(stock_data) == 0) {
+    return(NULL)
+  }
+  
+  tryCatch({
+    # Calculate individual stock investments
+    symbol_investments <- total_investment * weights
+    names(symbol_investments) <- symbols
+    
+    # Calculate individual stock performance
+    individual_stocks <- data.frame()
+    
+    for (i in seq_along(symbols)) {
+      symbol <- symbols[i]
+      investment <- symbol_investments[symbol]
+      
+      symbol_data <- stock_data %>%
+        filter(symbol == !!symbol) %>%
+        arrange(date)
+      
+      if (nrow(symbol_data) > 0) {
+        # Calculate performance based on price changes
+        initial_price <- symbol_data$adjusted_price[1]
+        
+        symbol_performance <- symbol_data %>%
+          mutate(
+            price_return = adjusted_price / initial_price,
+            investment = investment * price_return,
+            daily_return = c(0, diff(log(adjusted_price)))  # Log returns
+          ) %>%
+          select(date, symbol, investment, daily_return)
+        
+        individual_stocks <- rbind(individual_stocks, symbol_performance)
+      }
+    }
+    
+    if (nrow(individual_stocks) == 0) {
+      return(NULL)
+    }
+    
+    # Calculate portfolio totals
+    portfolio_tbl <- individual_stocks %>%
+      group_by(date) %>%
+      summarise(
+        investment = sum(investment, na.rm = TRUE),
+        daily_return = weighted.mean(daily_return, w = symbol_investments[symbol], na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      arrange(date)
+    
+    # Ensure we have valid portfolio data
+    portfolio_tbl <- portfolio_tbl %>%
+      filter(!is.na(investment), is.finite(investment), investment > 0)
+    
+    if (nrow(portfolio_tbl) == 0) {
+      return(NULL)
+    }
+    
+    return(list(
+      portfolio_tbl = portfolio_tbl,
+      individual_stocks = individual_stocks
+    ))
+    
+  }, error = function(e) {
+    warning(paste("Error in weighted portfolio calculation:", e$message))
+    return(NULL)
+  })
 }
