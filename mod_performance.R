@@ -58,14 +58,14 @@ performanceServer <- function(id, portfolios_reactive, portfolio_calc) {
       req(portfolio_data())
       
       plot_df <- bind_rows(
-        map_dfr(names(portfolio_data()$portfolios), ~tibble(
-          date = portfolio_data()$portfolios[[.x]]$dates,
-          return_pct = portfolio_data()$portfolios[[.x]]$cumulative_returns * 100,
-          portfolio = .x
-        )),
-        if(!is.null(portfolio_data()$sp500)) tibble(date = portfolio_data()$sp500$dates, return_pct = portfolio_data()$sp500$cumulative_returns * 100, portfolio = "S&P 500"),
-        if(!is.null(portfolio_data()$bitcoin)) tibble(date = portfolio_data()$bitcoin$dates, return_pct = portfolio_data()$bitcoin$cumulative_returns * 100, portfolio = "Bitcoin")
-      )
+  map_dfr(names(portfolio_data()$portfolios), ~tibble(
+    date = portfolio_data()$portfolios[[.x]]$dates,
+    return_pct = as.numeric(portfolio_data()$portfolios[[.x]]$cumulative_returns) * 100,
+    portfolio = .x
+  )),
+  if(!is.null(portfolio_data()$sp500)) tibble(date = portfolio_data()$sp500$dates, return_pct = as.numeric(portfolio_data()$sp500$cumulative_returns) * 100, portfolio = "S&P 500"),
+  if(!is.null(portfolio_data()$bitcoin)) tibble(date = portfolio_data()$bitcoin$dates, return_pct = as.numeric(portfolio_data()$bitcoin$cumulative_returns) * 100, portfolio = "Bitcoin")
+)
       
       if (nrow(plot_df) == 0) return(plotly_empty())
 
