@@ -1,4 +1,4 @@
-# mod_performance.R - Performance Overview Module
+# mod_performance.R - Updated Performance Overview Module for Excel Integration
 
 #' Performance Module UI
 #' @param id Module namespace ID
@@ -8,11 +8,35 @@ performanceUI <- function(id) {
   tagList(
     fluidRow(
       box(
-        title = "Portfolio Performance Comparison",
+        title = "Portfolio Selection & Comparison",
         status = "primary",
         solidHeader = TRUE,
         width = 12,
-        plotlyOutput(ns("performance_plot"), height = "400px")
+        fluidRow(
+          column(6,
+            h4("Current Portfolio"),
+            p("Always displayed:", style = "color: #3c8dbc; font-weight: bold;"),
+            verbatimTextOutput(ns("current_portfolio_info"))
+          ),
+          column(6,
+            h4("Add Historical Portfolios for Comparison"),
+            checkboxGroupInput(
+              ns("historical_portfolios"),
+              "Select historical portfolios:",
+              choices = NULL,
+              selected = NULL
+            )
+          )
+        )
+      )
+    ),
+    fluidRow(
+      box(
+        title = "Portfolio Performance vs BTC & S&P 500",
+        status = "primary",
+        solidHeader = TRUE,
+        width = 12,
+        plotlyOutput(ns("performance_plot"), height = "500px")
       )
     ),
     fluidRow(
@@ -20,7 +44,7 @@ performanceUI <- function(id) {
     ),
     fluidRow(
       box(
-        title = "Performance Metrics",
+        title = "Performance Metrics Comparison",
         status = "info",
         solidHeader = TRUE,
         width = 12,
@@ -42,18 +66,72 @@ performanceServer <- function(id, portfolios, portfolio_calculations) {
       names(portfolios())
     })
     
-    # Get selected portfolio data - automatically use ALL portfolios
-    selected_data <- reactive({
+    # Identify current vs historical portfolios
+    portfolio_info <- reactive({
       portfolio_names <- all_portfolio_names()
       
-      # Return empty if no portfolios available
-      if (length(portfolio_names) == 0) {
-        return(NULL)
+      if (length(portfolio_names) == 0) return(list(current = NULL, historical = NULL))
+      
+      # First portfolio is always current (most recent)
+      current_portfolio <- portfolio_names[1]
+      historical_portfolios <- if (length(portfolio_names) > 1) portfolio_names[-1] else NULL
+      
+      list(current = current_portfolio, historical = historical_portfolios)
+    })
+    
+    # Update historical portfolio choices
+    observe({
+      info <- portfolio_info()
+      
+      if (!is.null(info$historical)) {
+        updateCheckboxGroupInput(
+          session,
+          "historical_portfolios",
+          choices = setNames(info$historical, info$historical),
+          selected = NULL
+        )
+      } else {
+        updateCheckboxGroupInput(
+          session,
+          "historical_portfolios", 
+          choices = NULL,
+          selected = NULL
+        )
       }
+    })
+    
+    # Show current portfolio info
+    output$current_portfolio_info <- renderText({
+      info <- portfolio_info()
+      if (is.null(info$current)) return("No portfolio data available")
+      
+      current <- portfolios()[[info$current]]
+      if (is.null(current)) return("Current portfolio not found")
+      
+      paste0(
+        "Portfolio: ", info$current, "\n",
+        "Symbols: ", paste(current$symbols, collapse = ", "), "\n",
+        "Date: ", format(current$start_date, "%Y-%m-%d"), "\n",
+        "Positions: ", length(current$symbols)
+      )
+    })
+    
+    # Get selected portfolios (always include current + selected historical)
+    selected_portfolios <- reactive({
+      info <- portfolio_info()
+      selected <- c(info$current, input$historical_portfolios)
+      selected[!is.na(selected)]
+    })
+    
+    # Get portfolio data with calculations
+    portfolio_data <- reactive({
+      selected <- selected_portfolios()
+      
+      if (length(selected) == 0) return(NULL)
       
       portfolio_calculations(
         portfolios = portfolios(),
-        selected_portfolios = portfolio_names,  # Use ALL portfolios
+        selected_portfolios = selected,
         show_sp500 = TRUE,  # Always show S&P 500
         show_btc = TRUE     # Always show Bitcoin
       )
@@ -61,188 +139,207 @@ performanceServer <- function(id, portfolios, portfolio_calculations) {
     
     # Main performance plot
     output$performance_plot <- renderPlotly({
-      data <- selected_data()
+      data <- portfolio_data()
       if (is.null(data)) return(plotly_empty())
       
       plot_data <- prepare_performance_plot_data(data)
       
-      plot_ly(plot_data, x = ~date, y = ~return_pct, color = ~type,
-              type = "scatter", mode = "lines") %>%
+      # Create color scheme
+      colors <- c(
+        "#3c8dbc",  # Current portfolio (blue)
+        "#f39c12",  # Historical portfolios (orange)
+        "#e74c3c",  # Additional historical (red)
+        "#2ecc71",  # Additional historical (green)
+        "#9b59b6",  # Additional historical (purple)
+        "#1abc9c",  # Bitcoin (teal)  
+        "#34495e"   # S&P 500 (dark gray)
+      )
+      
+      plot <- plot_ly(plot_data, x = ~date, y = ~return_pct, color = ~portfolio,
+                     colors = colors, type = 'scatter', mode = 'lines',
+                     hovertemplate = "<b>%{fullData.name}</b><br>" +
+                                   "Date: %{x}<br>" +
+                                   "Return: %{y:.2f}%<br>" +
+                                   "<extra></extra>") %>%
         layout(
-          title = "Portfolio Performance Comparison",
+          title = "Portfolio Performance Comparison vs Benchmarks",
           xaxis = list(title = "Date"),
-          yaxis = list(title = "Return (%)"),
-          hovermode = "x unified"
+          yaxis = list(title = "Cumulative Return (%)"),
+          hovermode = 'x unified',
+          legend = list(orientation = "h", x = 0, y = -0.2),
+          margin = list(b = 100)
         )
+      
+      plot
     })
     
-    # Dynamic value boxes
+    # Portfolio value boxes
     output$portfolio_value_boxes <- renderUI({
-      data <- selected_data()
+      data <- portfolio_data()
       if (is.null(data)) return(NULL)
       
-      create_value_boxes(data, TRUE, TRUE)  # Always show both benchmarks
+      boxes <- list()
+      
+      # Create boxes for each portfolio and benchmark
+      for (name in names(data$portfolios)) {
+        portfolio <- data$portfolios[[name]]
+        final_return <- tail(portfolio$cumulative_returns, 1) * 100
+        
+        status <- if (grepl("Current", name)) "primary" else "warning"
+        
+        boxes[[length(boxes) + 1]] <- valueBox(
+          value = paste0(round(final_return, 2), "%"),
+          subtitle = name,
+          icon = icon("chart-line"),
+          color = if (status == "primary") "blue" else "yellow"
+        )
+      }
+      
+      # Add benchmark boxes
+      if (!is.null(data$sp500)) {
+        sp500_return <- tail(data$sp500$cumulative_returns, 1) * 100
+        boxes[[length(boxes) + 1]] <- valueBox(
+          value = paste0(round(sp500_return, 2), "%"),
+          subtitle = "S&P 500",
+          icon = icon("chart-bar"),
+          color = "green"
+        )
+      }
+      
+      if (!is.null(data$bitcoin)) {
+        btc_return <- tail(data$bitcoin$cumulative_returns, 1) * 100
+        boxes[[length(boxes) + 1]] <- valueBox(
+          value = paste0(round(btc_return, 2), "%"),
+          subtitle = "Bitcoin",
+          icon = icon("bitcoin"),
+          color = "orange"
+        )
+      }
+      
+      do.call(fluidRow, boxes)
     })
     
     # Performance metrics table
-    output$metrics_table <- DT::renderDataTable({
-      data <- selected_data()
+    output$metrics_table <- renderDT({
+      data <- portfolio_data()
       if (is.null(data)) return(data.frame())
       
-      metrics <- calculate_performance_metrics(data)
+      metrics_data <- calculate_performance_metrics(data)
       
-      DT::datatable(metrics, options = list(dom = 't'))
+      DT::datatable(
+        metrics_data,
+        options = list(
+          dom = 't',
+          pageLength = 20,
+          scrollX = TRUE,
+          columnDefs = list(
+            list(className = 'dt-center', targets = "_all")
+          )
+        ),
+        rownames = FALSE
+      ) %>%
+        formatPercentage(c('Total_Return', 'Volatility', 'Max_Drawdown'), 2) %>%
+        formatRound(c('Sharpe_Ratio'), 3)
     })
     
-    # Return selections for use by other modules (now always all portfolios + benchmarks)
-    reactive({
-      list(
-        selected = all_portfolio_names(),  # Always return all portfolio names
-        show_sp500 = TRUE,                 # Always show S&P 500
-        show_btc = TRUE                    # Always show Bitcoin
-      )
-    })
+    # Return selections for other modules
+    list(
+      selected = selected_portfolios,
+      show_sp500 = reactive(TRUE),
+      show_btc = reactive(TRUE)
+    )
   })
 }
 
-# Helper functions (could be in utils_performance.R)
-
-#' Prepare data for performance plot
+# Helper function to prepare plot data
 prepare_performance_plot_data <- function(data) {
-  all_data <- list()
+  plot_data <- data.frame()
   
   # Add portfolio data
-  for (portfolio_name in names(data$portfolios)) {
-    portfolio_info <- data$portfolios[[portfolio_name]]
-    total_investment <- portfolio_info$total_investment
-    
-    portfolio_data <- portfolio_info$portfolio_tbl %>%
-      mutate(
-        type = portfolio_name,
-        return_pct = (investment / total_investment - 1) * 100,
-        date = ymd(date)
-      ) %>%
-      select(date, type, return_pct)
-    
-    all_data[[portfolio_name]] <- portfolio_data
+  for (name in names(data$portfolios)) {
+    portfolio <- data$portfolios[[name]]
+    temp_data <- data.frame(
+      date = portfolio$dates,
+      return_pct = portfolio$cumulative_returns * 100,
+      portfolio = name
+    )
+    plot_data <- rbind(plot_data, temp_data)
   }
   
-  # Add benchmark data
-  if (!is.null(data$benchmarks$sp500)) {
-    all_data[["S&P 500"]] <- data$benchmarks$sp500 %>%
-      mutate(
-        type = "S&P 500",
-        return_pct = (sp500 / 10000 - 1) * 100,
-        date = ymd(date)
-      ) %>%
-      select(date, type, return_pct)
+  # Add S&P 500 data
+  if (!is.null(data$sp500)) {
+    temp_data <- data.frame(
+      date = data$sp500$dates,
+      return_pct = data$sp500$cumulative_returns * 100,
+      portfolio = "S&P 500"
+    )
+    plot_data <- rbind(plot_data, temp_data)
   }
   
-  if (!is.null(data$benchmarks$btc)) {
-    all_data[["Bitcoin"]] <- data$benchmarks$btc %>%
-      mutate(
-        type = "Bitcoin",
-        return_pct = (btc / 10000 - 1) * 100,
-        date = ymd(date)
-      ) %>%
-      select(date, type, return_pct)
+  # Add Bitcoin data
+  if (!is.null(data$bitcoin)) {
+    temp_data <- data.frame(
+      date = data$bitcoin$dates,
+      return_pct = data$bitcoin$cumulative_returns * 100,
+      portfolio = "Bitcoin"
+    )
+    plot_data <- rbind(plot_data, temp_data)
   }
   
-  bind_rows(all_data)
+  return(plot_data)
 }
 
-
-#' Create value boxes for portfolios and benchmarks
-create_value_boxes <- function(data, show_sp500, show_btc) {
-  value_boxes <- list()
-  
-  # Portfolio value boxes
-  for (portfolio_name in names(data$portfolios)) {
-    portfolio_info <- data$portfolios[[portfolio_name]]
-    current_value <- tail(portfolio_info$portfolio_tbl$investment, 1)
-    total_investment <- portfolio_info$total_investment
-    return_pct <- (current_value / total_investment - 1) * 100
-    
-    value_boxes[[portfolio_name]] <- valueBox(
-      value = paste0("$", formatC(round(current_value), 
-                                  format = "f", digits = 0, big.mark = ",")),
-      subtitle = paste0(portfolio_name, " (", round(return_pct, 1), "%)"),
-      icon = icon("chart-line"),
-      color = if (return_pct > 0) "green" else "red",
-      width = 4
-    )
-  }
-  
-  # Add benchmark boxes if needed
-  if (!is.null(data$benchmarks$sp500) && show_sp500) {
-    current_value <- tail(data$benchmarks$sp500$sp500, 1)
-    return_pct <- (current_value / 10000 - 1) * 100
-    
-    value_boxes[["SP500"]] <- valueBox(
-      value = paste0("$", formatC(round(current_value), 
-                                  format = "f", digits = 0, big.mark = ",")),
-      subtitle = paste0("S&P 500 (", round(return_pct, 1), "%)"),
-      icon = icon("chart-area"),
-      color = if (return_pct > 0) "blue" else "red",
-      width = 4
-    )
-  }
-  
-  if (!is.null(data$benchmarks$btc) && show_btc) {
-    current_value <- tail(data$benchmarks$btc$btc, 1)
-    return_pct <- (current_value / 10000 - 1) * 100
-    
-    value_boxes[["BTC"]] <- valueBox(
-      value = paste0("$", formatC(round(current_value), 
-                                  format = "f", digits = 0, big.mark = ",")),
-      subtitle = paste0("Bitcoin (", round(return_pct, 1), "%)"),
-      icon = icon("bitcoin"),
-      color = if (return_pct > 0) "yellow" else "red",
-      width = 4
-    )
-  }
-  
-  do.call(fluidRow, value_boxes)
-}
-
-#' Calculate performance metrics for portfolios
+# Helper function to calculate metrics
 calculate_performance_metrics <- function(data) {
-  metrics_list <- list()
+  metrics <- data.frame()
   
-  for (portfolio_name in names(data$portfolios)) {
-    portfolio_info <- data$portfolios[[portfolio_name]]
-    portfolio_tbl <- portfolio_info$portfolio_tbl
-    total_investment <- portfolio_info$total_investment
+  # Portfolio metrics
+  for (name in names(data$portfolios)) {
+    portfolio <- data$portfolios[[name]]
+    returns <- diff(log(portfolio$cumulative_returns + 1))
     
-    # Calculate returns
-    returns <- portfolio_tbl %>%
-      arrange(date) %>%
-      mutate(daily_return = (investment / lag(investment)) - 1) %>%
-      filter(!is.na(daily_return))
-    
-    if (nrow(returns) > 0) {
-      total_return <- (tail(portfolio_tbl$investment, 1) / total_investment - 1) * 100
-      volatility <- sd(returns$daily_return, na.rm = TRUE) * sqrt(252) * 100
-      sharpe <- mean(returns$daily_return, na.rm = TRUE) / 
-                sd(returns$daily_return, na.rm = TRUE) * sqrt(252)
-      
-      # Calculate max drawdown
-      cumulative <- cumprod(1 + returns$daily_return)
-      max_drawdown <- min((cumulative / cummax(cumulative) - 1) * 100, na.rm = TRUE)
-      
-      metrics_list[[portfolio_name]] <- data.frame(
-        Portfolio = portfolio_name,
-        Total_Return = paste0(round(total_return, 2), "%"),
-        Volatility = paste0(round(volatility, 2), "%"),
-        Sharpe_Ratio = round(sharpe, 3),
-        Max_Drawdown = paste0(round(max_drawdown, 2), "%")
-      )
-    }
+    metric_row <- data.frame(
+      Portfolio = name,
+      Total_Return = tail(portfolio$cumulative_returns, 1),
+      Volatility = sd(returns, na.rm = TRUE) * sqrt(252),
+      Sharpe_Ratio = mean(returns, na.rm = TRUE) / sd(returns, na.rm = TRUE) * sqrt(252),
+      Max_Drawdown = calculate_max_drawdown(portfolio$cumulative_returns)
+    )
+    metrics <- rbind(metrics, metric_row)
   }
   
-  if (length(metrics_list) > 0) {
-    bind_rows(metrics_list)
-  } else {
-    data.frame()
+  # Benchmark metrics
+  if (!is.null(data$sp500)) {
+    returns <- diff(log(data$sp500$cumulative_returns + 1))
+    metric_row <- data.frame(
+      Portfolio = "S&P 500",
+      Total_Return = tail(data$sp500$cumulative_returns, 1),
+      Volatility = sd(returns, na.rm = TRUE) * sqrt(252),
+      Sharpe_Ratio = mean(returns, na.rm = TRUE) / sd(returns, na.rm = TRUE) * sqrt(252),
+      Max_Drawdown = calculate_max_drawdown(data$sp500$cumulative_returns)
+    )
+    metrics <- rbind(metrics, metric_row)
   }
+  
+  if (!is.null(data$bitcoin)) {
+    returns <- diff(log(data$bitcoin$cumulative_returns + 1))
+    metric_row <- data.frame(
+      Portfolio = "Bitcoin",
+      Total_Return = tail(data$bitcoin$cumulative_returns, 1),
+      Volatility = sd(returns, na.rm = TRUE) * sqrt(252),
+      Sharpe_Ratio = mean(returns, na.rm = TRUE) / sd(returns, na.rm = TRUE) * sqrt(252),
+      Max_Drawdown = calculate_max_drawdown(data$bitcoin$cumulative_returns)
+    )
+    metrics <- rbind(metrics, metric_row)
+  }
+  
+  return(metrics)
+}
+
+# Helper function for max drawdown
+calculate_max_drawdown <- function(returns) {
+  cumulative <- cumprod(1 + returns)
+  running_max <- cummax(cumulative)
+  drawdown <- (cumulative - running_max) / running_max
+  return(min(drawdown, na.rm = TRUE))
 }

@@ -1,4 +1,4 @@
-# R/mod_holdings.R - Holdings Module
+# mod_holdings.R - Updated Holdings Module for Excel-based Portfolios
 
 #' Holdings Module UI
 #' @param id Module namespace ID
@@ -8,15 +8,50 @@ holdingsUI <- function(id) {
   tagList(
     fluidRow(
       box(
-        title = "Portfolio Holdings Analysis",
-        status = "info",
+        title = "Current Portfolio Holdings",
+        status = "primary",
         solidHeader = TRUE,
-        width = 12,
-        p("Select portfolios from the Performance Overview tab to view their holdings breakdown.")
+        width = 6,
+        plotlyOutput(ns("current_pie_chart"))
+      ),
+      box(
+        title = "Holdings Comparison",
+        status = "info", 
+        solidHeader = TRUE,
+        width = 6,
+        conditionalPanel(
+          condition = "output.has_historical_data",
+          ns = ns,
+          plotlyOutput(ns("comparison_chart"))
+        ),
+        conditionalPanel(
+          condition = "!output.has_historical_data",
+          ns = ns,
+          div(
+            style = "text-align: center; padding: 50px;",
+            h4("No Historical Data Available", style = "color: gray;"),
+            p("Select historical portfolios in the Performance tab to compare holdings.")
+          )
+        )
       )
     ),
     fluidRow(
-      uiOutput(ns("holdings_plots"))
+      box(
+        title = "Individual Stock Performance",
+        status = "success",
+        solidHeader = TRUE,
+        width = 12,
+        plotlyOutput(ns("stock_performance_chart"))
+      )
+    ),
+    fluidRow(
+      box(
+        title = "Holdings Details",
+        status = "warning",
+        solidHeader = TRUE,
+        width = 12,
+        DT::dataTableOutput(ns("holdings_table"))
+      )
     )
   )
 }
@@ -35,249 +70,223 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
       
       selections <- performance_selections()
       
-      if (length(selections$selected) == 0) {
+      if (length(selections$selected()) == 0) {
         return(NULL)
       }
       
       portfolio_calc(
         portfolios = portfolios_reactive(),
-        selected_portfolios = selections$selected,
-        show_sp500 = FALSE,
+        selected_portfolios = selections$selected(),
+        show_sp500 = FALSE,  # Don't need benchmarks for holdings analysis
         show_btc = FALSE
       )
     })
     
-    # Dynamic holdings plots
-    output$holdings_plots <- renderUI({
+    # Check if we have historical data for comparison
+    output$has_historical_data <- reactive({
+      data <- portfolio_data()
+      !is.null(data) && length(data$portfolios) > 1
+    })
+    outputOptions(output, "has_historical_data", suspendWhenHidden = FALSE)
+    
+    # Current portfolio (first/most recent) pie chart
+    output$current_pie_chart <- renderPlotly({
       data <- portfolio_data()
       if (is.null(data) || length(data$portfolios) == 0) {
-        return(
-          box(
-            width = 12,
-            p("No portfolios selected. Please select portfolios from the Performance Overview tab.")
-          )
-        )
+        return(plotly_empty("No current portfolio data"))
       }
       
-      plot_list <- list()
+      # Get current (first) portfolio
+      current_name <- names(data$portfolios)[1]
+      current_portfolio <- data$portfolios[[current_name]]
       
-      # Create plots for each portfolio
-      for (i in seq_along(names(data$portfolios))) {
-        portfolio_name <- names(data$portfolios)[i]
-        
-        # Allocation pie chart
-        plot_list[[paste0("pie_", i)]] <- box(
-          title = paste("Allocation:", portfolio_name),
-          status = "success",
-          solidHeader = TRUE,
-          width = 6,
-          plotlyOutput(session$ns(paste0("holdings_pie_", i)))
-        )
-        
-        # Individual performance chart
-        plot_list[[paste0("perf_", i)]] <- box(
-          title = paste("Individual Stock Performance:", portfolio_name),
-          status = "primary",
-          solidHeader = TRUE,
-          width = 6,
-          plotlyOutput(session$ns(paste0("individual_performance_", i)))
-        )
-        
-        # Contribution chart
-        plot_list[[paste0("contrib_", i)]] <- box(
-          title = paste("Return Contribution:", portfolio_name),
-          status = "info",
-          solidHeader = TRUE,
-          width = 6,
-          plotlyOutput(session$ns(paste0("contribution_", i)))
-        )
-        
-        # Holdings table
-        plot_list[[paste0("table_", i)]] <- box(
-          title = paste("Holdings Details:", portfolio_name),
-          status = "warning",
-          solidHeader = TRUE,
-          width = 6,
-          DT::dataTableOutput(session$ns(paste0("holdings_table_", i)))
-        )
-      }
+      # Get final values for each stock
+      holdings_data <- current_portfolio$individual_stocks %>%
+        group_by(symbol) %>%
+        slice_tail(n = 1) %>%
+        ungroup() %>%
+        select(symbol, investment) %>%
+        arrange(desc(investment))
       
-      # Arrange plots in rows
-      rows <- list()
-      for (i in seq(1, length(plot_list), by = 2)) {
-        if (i + 1 <= length(plot_list)) {
-          rows[[ceiling(i/2)]] <- fluidRow(plot_list[[i]], plot_list[[i+1]])
-        } else {
-          rows[[ceiling(i/2)]] <- fluidRow(plot_list[[i]])
-        }
-      }
-      
-      do.call(tagList, rows)
+      plot_ly(
+        holdings_data,
+        labels = ~symbol,
+        values = ~investment,
+        type = 'pie',
+        hovertemplate = "<b>%{label}</b><br>" +
+                       "Value: $%{value:,.0f}<br>" +
+                       "Percentage: %{percent}<br>" +
+                       "<extra></extra>",
+        marker = list(colors = RColorBrewer::brewer.pal(n = min(nrow(holdings_data), 11), name = "Spectral"))
+      ) %>%
+        layout(
+          title = paste("Current Portfolio Holdings:", current_name),
+          showlegend = TRUE,
+          legend = list(orientation = "v", x = 1.02, y = 0.5)
+        )
     })
     
-    # Create dynamic plot outputs
-    observe({
+    # Holdings comparison chart (if multiple portfolios selected)
+    output$comparison_chart <- renderPlotly({
       data <- portfolio_data()
-      if (is.null(data)) return()
-      
-      for (i in seq_along(names(data$portfolios))) {
-        local({
-          my_i <- i
-          portfolio_name <- names(data$portfolios)[my_i]
-          portfolio_info <- data$portfolios[[portfolio_name]]
-          
-          # Allocation pie chart
-          output[[paste0("holdings_pie_", my_i)]] <- renderPlotly({
-            create_allocation_pie(portfolio_info, portfolio_name)
-          })
-          
-          # Individual performance chart
-          output[[paste0("individual_performance_", my_i)]] <- renderPlotly({
-            create_individual_performance_chart(portfolio_info, portfolio_name)
-          })
-          
-          # Contribution chart
-          output[[paste0("contribution_", my_i)]] <- renderPlotly({
-            create_contribution_chart(portfolio_info, portfolio_name)
-          })
-          
-          # Holdings table
-          output[[paste0("holdings_table_", my_i)]] <- DT::renderDataTable({
-            create_holdings_table(portfolio_info)
-          })
-        })
+      if (is.null(data) || length(data$portfolios) <= 1) {
+        return(plotly_empty("Select historical portfolios to compare"))
       }
+      
+      # Prepare comparison data
+      comparison_data <- data.frame()
+      
+      for (portfolio_name in names(data$portfolios)) {
+        portfolio <- data$portfolios[[portfolio_name]]
+        
+        # Get final weights for each symbol
+        final_holdings <- portfolio$individual_stocks %>%
+          group_by(symbol) %>%
+          slice_tail(n = 1) %>%
+          ungroup()
+        
+        total_value <- sum(final_holdings$investment)
+        final_holdings$weight <- final_holdings$investment / total_value
+        
+        temp_data <- data.frame(
+          portfolio = portfolio_name,
+          symbol = final_holdings$symbol,
+          weight = final_holdings$weight * 100  # Convert to percentage
+        )
+        
+        comparison_data <- rbind(comparison_data, temp_data)
+      }
+      
+      # Create grouped bar chart
+      plot_ly(
+        comparison_data,
+        x = ~symbol,
+        y = ~weight,
+        color = ~portfolio,
+        type = 'bar',
+        hovertemplate = "<b>%{fullData.name}</b><br>" +
+                       "Symbol: %{x}<br>" +
+                       "Weight: %{y:.2f}%<br>" +
+                       "<extra></extra>"
+      ) %>%
+        layout(
+          title = "Portfolio Holdings Comparison",
+          xaxis = list(title = "Symbols"),
+          yaxis = list(title = "Weight (%)"),
+          barmode = 'group',
+          legend = list(orientation = "h", x = 0, y = -0.2)
+        )
+    })
+    
+    # Individual stock performance chart
+    output$stock_performance_chart <- renderPlotly({
+      data <- portfolio_data()
+      if (is.null(data) || length(data$portfolios) == 0) {
+        return(plotly_empty("No portfolio data available"))
+      }
+      
+      # Use current portfolio for individual stock performance
+      current_name <- names(data$portfolios)[1]
+      current_portfolio <- data$portfolios[[current_name]]
+      
+      # Prepare stock performance data
+      stock_data <- current_portfolio$individual_stocks %>%
+        group_by(symbol) %>%
+        mutate(
+          initial_investment = first(investment),
+          return_pct = (investment / initial_investment - 1) * 100
+        ) %>%
+        ungroup()
+      
+      # Create color palette
+      n_stocks <- length(unique(stock_data$symbol))
+      colors <- RColorBrewer::brewer.pal(n = min(max(n_stocks, 3), 11), name = "Set3")
+      
+      plot_ly(
+        stock_data,
+        x = ~date,
+        y = ~return_pct,
+        color = ~symbol,
+        colors = colors,
+        type = 'scatter',
+        mode = 'lines',
+        hovertemplate = "<b>%{fullData.name}</b><br>" +
+                       "Date: %{x}<br>" +
+                       "Return: %{y:.2f}%<br>" +
+                       "<extra></extra>"
+      ) %>%
+        layout(
+          title = "Individual Stock Performance",
+          xaxis = list(title = "Date"),
+          yaxis = list(title = "Return (%)"),
+          hovermode = 'x unified',
+          legend = list(orientation = "h", x = 0, y = -0.2)
+        )
+    })
+    
+    # Holdings details table
+    output$holdings_table <- renderDT({
+      data <- portfolio_data()
+      if (is.null(data) || length(data$portfolios) == 0) {
+        return(data.frame(Message = "No portfolio data available"))
+      }
+      
+      # Create comprehensive holdings table for all selected portfolios
+      holdings_summary <- data.frame()
+      
+      for (portfolio_name in names(data$portfolios)) {
+        portfolio <- data$portfolios[[portfolio_name]]
+        
+        # Get final values for each stock
+        final_holdings <- portfolio$individual_stocks %>%
+          group_by(symbol) %>%
+          summarise(
+            initial_investment = first(investment),
+            final_investment = last(investment),
+            .groups = 'drop'
+          ) %>%
+          mutate(
+            total_return = (final_investment / initial_investment - 1) * 100,
+            portfolio = portfolio_name
+          )
+        
+        holdings_summary <- rbind(holdings_summary, final_holdings)
+      }
+      
+      # Calculate total portfolio values and weights
+      holdings_summary <- holdings_summary %>%
+        group_by(portfolio) %>%
+        mutate(
+          portfolio_total = sum(final_investment),
+          weight = (final_investment / portfolio_total) * 100
+        ) %>%
+        ungroup() %>%
+        select(portfolio, symbol, weight, initial_investment, final_investment, total_return) %>%
+        arrange(portfolio, desc(weight))
+      
+      DT::datatable(
+        holdings_summary,
+        options = list(
+          dom = 'tp',
+          pageLength = 15,
+          scrollX = TRUE,
+          columnDefs = list(
+            list(className = 'dt-center', targets = "_all")
+          )
+        ),
+        rownames = FALSE,
+        colnames = c(
+          "Portfolio", "Symbol", "Weight (%)", 
+          "Initial ($)", "Current ($)", "Return (%)"
+        )
+      ) %>%
+        formatRound(c('weight', 'total_return'), 2) %>%
+        formatCurrency(c('initial_investment', 'final_investment'), digits = 0) %>%
+        formatStyle(
+          'total_return',
+          backgroundColor = styleInterval(0, c('#ffcccc', '#ccffcc')),
+          color = styleInterval(0, c('#d9534f', '#5cb85c'))
+        )
     })
   })
-}
-
-# Helper functions for holdings visualizations
-
-#' Create allocation pie chart
-create_allocation_pie <- function(portfolio_info, portfolio_name) {
-  # Get current values for each stock
-  current_values <- portfolio_info$individual_stocks %>%
-    group_by(symbol) %>%
-    slice_tail(n = 1) %>%
-    ungroup() %>%
-    select(symbol, investment)
-  
-  plot_ly(
-    labels = current_values$symbol,
-    values = current_values$investment,
-    type = "pie",
-    textinfo = "label+percent",
-    textposition = "outside",
-    marker = list(
-      colors = RColorBrewer::brewer.pal(
-        min(nrow(current_values), 12), 
-        "Set3"
-      )
-    )
-  ) %>%
-    layout(
-      title = paste("Current Allocation -", portfolio_name),
-      showlegend = TRUE
-    )
-}
-
-#' Create individual stock performance chart
-create_individual_performance_chart <- function(portfolio_info, portfolio_name) {
-  individual_data <- portfolio_info$individual_stocks %>%
-    mutate(
-      date = ymd(date),
-      return_pct = (investment / (portfolio_info$total_investment * weight) - 1) * 100
-    )
-  
-  plot_ly(individual_data, x = ~date, y = ~return_pct, color = ~symbol,
-          type = "scatter", mode = "lines") %>%
-    layout(
-      title = paste("Individual Returns -", portfolio_name),
-      xaxis = list(title = "Date"),
-      yaxis = list(title = "Return (%)"),
-      hovermode = "x unified"
-    )
-}
-
-#' Create contribution chart
-create_contribution_chart <- function(portfolio_info, portfolio_name) {
-  # Calculate contribution to total return
-  contributions <- portfolio_info$individual_stocks %>%
-    group_by(symbol) %>%
-    summarise(
-      initial_value = first(portfolio_info$total_investment * weight),
-      final_value = last(investment),
-      contribution = final_value - initial_value,
-      return_pct = (final_value / initial_value - 1) * 100,
-      .groups = 'drop'
-    ) %>%
-    mutate(
-      contribution_pct = contribution / sum(abs(contribution)) * 100
-    )
-  
-  plot_ly(contributions, x = ~symbol, y = ~contribution,
-          type = "bar",
-          marker = list(
-            color = ~contribution,
-            colorscale = list(
-              list(0, "red"),
-              list(0.5, "white"),
-              list(1, "green")
-            ),
-            showscale = TRUE
-          ),
-          text = ~paste("Return: ", round(return_pct, 1), "%<br>",
-                       "Contribution: $", round(contribution, 0)),
-          hovertemplate = "%{text}<extra></extra>") %>%
-    layout(
-      title = paste("Return Contribution by Stock -", portfolio_name),
-      xaxis = list(title = "Stock Symbol"),
-      yaxis = list(title = "Contribution ($)"),
-      showlegend = FALSE
-    )
-}
-
-#' Create holdings detail table
-create_holdings_table <- function(portfolio_info) {
-  holdings_summary <- portfolio_info$individual_stocks %>%
-    group_by(symbol) %>%
-    summarise(
-      Weight = round(first(weight) * 100, 1),
-      Initial_Investment = round(first(portfolio_info$total_investment * weight), 0),
-      Current_Value = round(last(investment), 0),
-      Total_Return = round((last(investment) / first(portfolio_info$total_investment * weight) - 1) * 100, 2),
-      Daily_Volatility = round(sd(c(0, diff(investment)) / lag(investment)[-1], na.rm = TRUE) * 100, 2),
-      .groups = 'drop'
-    ) %>%
-    arrange(desc(Current_Value))
-  
-  # Format for display
-  holdings_display <- holdings_summary %>%
-    mutate(
-      Weight = paste0(Weight, "%"),
-      Initial_Investment = paste0("$", formatC(Initial_Investment, format = "f", 
-                                               digits = 0, big.mark = ",")),
-      Current_Value = paste0("$", formatC(Current_Value, format = "f", 
-                                          digits = 0, big.mark = ",")),
-      Total_Return = paste0(Total_Return, "%"),
-      Daily_Volatility = paste0(Daily_Volatility, "%")
-    ) %>%
-    rename(
-      Symbol = symbol,
-      `Weight (%)` = Weight,
-      `Initial ($)` = Initial_Investment,
-      `Current ($)` = Current_Value,
-      `Return (%)` = Total_Return,
-      `Volatility (%)` = Daily_Volatility
-    )
-  
-  DT::datatable(
-    holdings_display,
-    options = list(
-      dom = 't',
-      pageLength = 20,
-      ordering = TRUE
-    ),
-    rownames = FALSE
-  )
 }
