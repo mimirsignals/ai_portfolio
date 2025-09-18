@@ -27,7 +27,7 @@ server <- function(input, output, session) {
   })
   
   # Use the corrected wrapper function
-  portfolio_calc <- calculate_all_portfolios
+  portfolio_calc <- calculate_all_portfolios_with_inheritance
 
   performance_selections <- performanceServer("performance", portfolios_reactive, portfolio_calc)
   riskServer("risk", portfolios_reactive, portfolio_calc, performance_selections)

@@ -217,3 +217,137 @@ calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_inv
     return(NULL)
   })
 }
+
+
+#' Calculate portfolio performance with rebalancing inheritance
+#' @param symbols Vector of stock symbols
+#' @param weights Vector of portfolio weights  
+#' @param start_date Start date for calculation
+#' @param total_investment Total investment amount
+#' @param portfolio_name Name of portfolio (for identification)
+#' @param all_portfolios List of all portfolio definitions (for inheritance)
+#' @return List containing portfolio_tbl and individual_stocks data
+run_portfolio_calculations_with_inheritance <- function(symbols, weights, start_date, total_investment, portfolio_name = "Portfolio", all_portfolios = NULL) {
+  
+  # Input validation
+  if (length(symbols) == 0 || length(weights) == 0) {
+    warning("Empty symbols or weights provided")
+    return(NULL)
+  }
+  
+  # Check if this portfolio should inherit from a previous one
+  parent_performance <- find_parent_portfolio_performance(start_date, all_portfolios, total_investment)
+  
+  if (!is.null(parent_performance)) {
+    cat("Portfolio", portfolio_name, "inheriting performance from parent portfolio\n")
+    
+    # Calculate performance from rebalancing date forward
+    current_performance <- calculate_portfolio_from_date(symbols, weights, start_date, total_investment, portfolio_name)
+    
+    if (!is.null(current_performance)) {
+      # Merge inherited performance with current performance
+      merged_performance <- merge_portfolio_performances(parent_performance, current_performance, start_date, total_investment)
+      return(merged_performance)
+    } else {
+      # If current calculation fails, return inherited performance up to start date
+      return(truncate_performance_to_date(parent_performance, start_date))
+    }
+  } else {
+    # No inheritance needed, calculate normally
+    return(run_portfolio_calculations(symbols, weights, start_date, total_investment, portfolio_name))
+  }
+}
+
+#' Find parent portfolio performance to inherit from
+find_parent_portfolio_performance <- function(current_start_date, all_portfolios, total_investment) {
+  if (is.null(all_portfolios) || length(all_portfolios) == 0) return(NULL)
+  
+  # Find the most recent portfolio that started before current_start_date
+  eligible_portfolios <- all_portfolios[sapply(all_portfolios, function(p) p$start_date < current_start_date)]
+  
+  if (length(eligible_portfolios) == 0) return(NULL)
+  
+  # Get the most recent parent (latest start date)
+  parent_dates <- sapply(eligible_portfolios, function(p) p$start_date)
+  most_recent_idx <- which.max(parent_dates)
+  parent_portfolio <- eligible_portfolios[[most_recent_idx]]
+  
+  # Calculate parent portfolio performance
+  parent_performance <- run_portfolio_calculations(
+    parent_portfolio$symbols, 
+    parent_portfolio$weights, 
+    parent_portfolio$start_date, 
+    total_investment,  # Use same total investment
+    "Parent"
+  )
+  
+  return(parent_performance)
+}
+
+#' Calculate portfolio performance starting from a specific date
+calculate_portfolio_from_date <- function(symbols, weights, start_date, total_investment, portfolio_name) {
+  # This uses the existing run_portfolio_calculations function
+  return(run_portfolio_calculations(symbols, weights, start_date, total_investment, portfolio_name))
+}
+
+#' Merge parent performance with current performance at rebalancing date
+merge_portfolio_performances <- function(parent_performance, current_performance, rebalance_date, total_investment) {
+  if (is.null(parent_performance) || is.null(current_performance)) return(current_performance)
+  
+  # Get parent performance up to (but not including) rebalance date
+  parent_pre_rebalance <- parent_performance$portfolio_tbl %>%
+    filter(date < rebalance_date)
+  
+  # Get current performance from rebalance date forward
+  current_post_rebalance <- current_performance$portfolio_tbl %>%
+    filter(date >= rebalance_date)
+  
+  if (nrow(parent_pre_rebalance) == 0) {
+    return(current_performance)
+  }
+  
+  if (nrow(current_post_rebalance) == 0) {
+    return(list(
+      portfolio_tbl = parent_pre_rebalance,
+      individual_stocks = parent_performance$individual_stocks %>%
+        filter(date < rebalance_date)
+    ))
+  }
+  
+  # Get the portfolio value at rebalancing date from parent
+  last_parent_value <- tail(parent_pre_rebalance$investment, 1)
+  
+  # Adjust current performance to start from parent's final value
+  adjustment_factor <- last_parent_value / total_investment
+  
+  current_adjusted <- current_post_rebalance %>%
+    mutate(investment = investment * adjustment_factor)
+  
+  # Combine the performances
+  merged_portfolio_tbl <- bind_rows(parent_pre_rebalance, current_adjusted)
+  
+  # Handle individual stocks (inherit parent stocks pre-rebalance, current stocks post-rebalance)
+  parent_stocks_pre <- parent_performance$individual_stocks %>%
+    filter(date < rebalance_date)
+  
+  current_stocks_post <- current_performance$individual_stocks %>%
+    filter(date >= rebalance_date) %>%
+    mutate(investment = investment * adjustment_factor)
+  
+  merged_individual_stocks <- bind_rows(parent_stocks_pre, current_stocks_post)
+  
+  return(list(
+    portfolio_tbl = merged_portfolio_tbl,
+    individual_stocks = merged_individual_stocks
+  ))
+}
+
+#' Truncate performance data to a specific date
+truncate_performance_to_date <- function(performance, end_date) {
+  if (is.null(performance)) return(NULL)
+  
+  return(list(
+    portfolio_tbl = performance$portfolio_tbl %>% filter(date <= end_date),
+    individual_stocks = performance$individual_stocks %>% filter(date <= end_date)
+  ))
+}
