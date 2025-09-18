@@ -89,8 +89,8 @@ fetch_stock_data <- function(symbols, start_date) {
     return(NULL)
   }
   
-  # Set reasonable end date (today)
-  end_date <- Sys.Date()
+  # Set reasonable end date (today + 1 to include today's data)
+  end_date <- Sys.Date() + 1
   
   # Ensure start_date is reasonable
   if (start_date > end_date) {

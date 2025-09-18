@@ -53,18 +53,9 @@ riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_sele
     
     # Get portfolio data based on performance module selections
     portfolio_data <- reactive({
-      req(performance_selections)
+      req(performance_selections())
       
-      selections <- performance_selections
-      if (is.null(selections) || !is.list(selections)) {
-        return(NULL)
-      }
-      
-      selected_portfolios <- if (is.function(selections$selected)) {
-        selections$selected()
-      } else {
-        selections$selected
-      }
+      selected_portfolios <- performance_selections()
       
       if (length(selected_portfolios) == 0) {
         return(NULL)
@@ -195,97 +186,46 @@ riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_sele
 calculate_all_returns <- function(data) {
   all_returns <- list()
   
+  process_returns <- function(series, name) {
+    if (is.null(series) || length(series$cumulative_returns) < 2) return(NULL)
+    
+    # Calculate daily returns from cumulative returns using log differences
+    daily_returns <- c(0, diff(log1p(series$cumulative_returns))) * 100
+    
+    returns_df <- data.frame(
+      date = as.Date(series$dates),
+      daily_return = daily_returns,
+      type = name,
+      stringsAsFactors = FALSE
+    ) %>%
+      filter(is.finite(daily_return), !is.na(daily_return))
+      
+    if (nrow(returns_df) > 0) {
+      return(returns_df)
+    }
+    return(NULL)
+  }
+
   # Portfolio returns
   if (!is.null(data$portfolios) && length(data$portfolios) > 0) {
     for (portfolio_name in names(data$portfolios)) {
-      portfolio_info <- data$portfolios[[portfolio_name]]
-      
-      if (!is.null(portfolio_info$cumulative_returns) && 
-          length(portfolio_info$cumulative_returns) > 1) {
-        
-        # Calculate daily returns from cumulative returns
-        cumulative_returns <- as.numeric(portfolio_info$cumulative_returns)
-        dates <- as.Date(portfolio_info$dates)
-        
-        # Remove any invalid data
-        valid_indices <- is.finite(cumulative_returns) & !is.na(dates)
-        cumulative_returns <- cumulative_returns[valid_indices]
-        dates <- dates[valid_indices]
-        
-        if (length(cumulative_returns) > 1) {
-          # Calculate daily returns
-          daily_returns <- c(0, diff(log(cumulative_returns + 1))) * 100
-          
-          returns_df <- data.frame(
-            date = dates,
-            daily_return = daily_returns,
-            type = portfolio_name,
-            stringsAsFactors = FALSE
-          ) %>%
-            filter(is.finite(daily_return), !is.na(daily_return))
-          
-          if (nrow(returns_df) > 0) {
-            all_returns[[portfolio_name]] <- returns_df
-          }
-        }
-      }
+      all_returns[[portfolio_name]] <- process_returns(data$portfolios[[portfolio_name]], portfolio_name)
     }
   }
   
   # S&P 500 returns
-  if (!is.null(data$sp500) && !is.null(data$sp500$cumulative_returns)) {
-    cumulative_returns <- as.numeric(data$sp500$cumulative_returns)
-    dates <- as.Date(data$sp500$dates)
-    
-    valid_indices <- is.finite(cumulative_returns) & !is.na(dates)
-    cumulative_returns <- cumulative_returns[valid_indices]
-    dates <- dates[valid_indices]
-    
-    if (length(cumulative_returns) > 1) {
-      daily_returns <- c(0, diff(log(cumulative_returns + 1))) * 100
-      
-      returns_df <- data.frame(
-        date = dates,
-        daily_return = daily_returns,
-        type = "S&P 500",
-        stringsAsFactors = FALSE
-      ) %>%
-        filter(is.finite(daily_return), !is.na(daily_return))
-      
-      if (nrow(returns_df) > 0) {
-        all_returns[["S&P 500"]] <- returns_df
-      }
-    }
+  if (!is.null(data$sp500)) {
+    all_returns[["S&P 500"]] <- process_returns(data$sp500, "S&P 500")
   }
   
   # Bitcoin returns
-  if (!is.null(data$bitcoin) && !is.null(data$bitcoin$cumulative_returns)) {
-    cumulative_returns <- as.numeric(data$bitcoin$cumulative_returns)
-    dates <- as.Date(data$bitcoin$dates)
-    
-    valid_indices <- is.finite(cumulative_returns) & !is.na(dates)
-    cumulative_returns <- cumulative_returns[valid_indices]
-    dates <- dates[valid_indices]
-    
-    if (length(cumulative_returns) > 1) {
-      daily_returns <- c(0, diff(log(cumulative_returns + 1))) * 100
-      
-      returns_df <- data.frame(
-        date = dates,
-        daily_return = daily_returns,
-        type = "Bitcoin",
-        stringsAsFactors = FALSE
-      ) %>%
-        filter(is.finite(daily_return), !is.na(daily_return))
-      
-      if (nrow(returns_df) > 0) {
-        all_returns[["Bitcoin"]] <- returns_df
-      }
-    }
+  if (!is.null(data$bitcoin)) {
+    all_returns[["Bitcoin"]] <- process_returns(data$bitcoin, "Bitcoin")
   }
   
   return(all_returns)
 }
+
 
 #' Calculate rolling volatility
 calculate_volatility <- function(data, window = 30) {

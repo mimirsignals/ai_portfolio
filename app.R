@@ -26,7 +26,8 @@ server <- function(input, output, session) {
     load_portfolios_from_excel("portfolio.xlsx")
   })
   
-  portfolio_calc <- run_portfolio_calculations
+  # Use the corrected wrapper function
+  portfolio_calc <- calculate_all_portfolios
 
   performance_selections <- performanceServer("performance", portfolios_reactive, portfolio_calc)
   riskServer("risk", portfolios_reactive, portfolio_calc, performance_selections)

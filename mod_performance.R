@@ -73,10 +73,22 @@ performanceServer <- function(id, portfolios_reactive, portfolio_calc) {
         layout(title = "Performance Comparison", yaxis = list(title = "Cumulative Return (%)"), hovermode = 'x unified')
     })
     
-    # ... Other outputs like value_boxes and metrics_table remain largely the same ...
-    # (Code for these is omitted for brevity but should be kept in your file)
+    output$metrics_table <- renderDT({
+      data <- portfolio_data()
+      if (is.null(data)) return(data.frame(Message = "No data available"))
+      
+      metrics <- calculate_performance_metrics(data)
+      
+      if (is.null(metrics) || nrow(metrics) == 0) {
+        return(data.frame(Message = "No performance metrics available"))
+      }
+      
+      DT::datatable(metrics, options = list(dom = 't'), rownames = FALSE) %>%
+        DT::formatPercentage(c("Total_Return", "Volatility", "Max_Drawdown"), 2) %>%
+        DT::formatRound("Sharpe_Ratio", 2)
+    })
     
-    return(reactive(list(selected = selected_portfolios_reactive())))
+    return(selected_portfolios_reactive)
   })
 }
 
@@ -90,30 +102,44 @@ calculate_max_drawdown <- function(returns) {
 }
 
 calculate_performance_metrics <- function(data) {
-  # This function from your original file can be kept, but it needs cumulative_returns
-  # A simplified version is shown below
   metrics_list <- list()
   
   process_series <- function(name, series) {
     if (is.null(series) || length(series$cumulative_returns) < 2) return(NULL)
     total_ret <- tail(series$cumulative_returns, 1)
+    
+    # Use log returns for volatility and Sharpe ratio calculation
     daily_ret <- diff(log1p(series$cumulative_returns))
     
+    # Ensure there are no NA values before calculations
+    daily_ret <- daily_ret[!is.na(daily_ret)]
+    
+    if (length(daily_ret) < 2) return(NULL)
+
     vol <- sd(daily_ret, na.rm = TRUE) * sqrt(252)
     sharpe <- if (vol > 0) (mean(daily_ret, na.rm = TRUE) * 252) / vol else 0
     max_dd <- calculate_max_drawdown(series$cumulative_returns)
     
     tibble(
-      Portfolio = name, Total_Return = total_ret, Volatility = vol,
-      Sharpe_Ratio = sharpe, Max_Drawdown = max_dd
+      Portfolio = name, 
+      Total_Return = total_ret, 
+      Volatility = vol,
+      Sharpe_Ratio = sharpe, 
+      Max_Drawdown = max_dd
     )
   }
   
   for (name in names(data$portfolios)) {
     metrics_list[[name]] <- process_series(name, data$portfolios[[name]])
   }
-  metrics_list[["S&P 500"]] <- process_series("S&P 500", data$sp500)
-  metrics_list[["Bitcoin"]] <- process_series("Bitcoin", data$bitcoin)
+  
+  if (!is.null(data$sp500)) {
+    metrics_list[["S&P 500"]] <- process_series("S&P 500", data$sp500)
+  }
+  
+  if (!is.null(data$bitcoin)) {
+    metrics_list[["Bitcoin"]] <- process_series("Bitcoin", data$bitcoin)
+  }
   
   bind_rows(metrics_list)
 }

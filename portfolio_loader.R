@@ -17,6 +17,9 @@ load_portfolios_from_excel <- function(file_path, initial_investment = 10000) {
     # Use readxl to read the Excel file
     portfolio_df <- readxl::read_excel(file_path)
 
+    # Clean and convert weights
+    portfolio_df$weight <- gsub(",", ".", portfolio_df$weight)
+    
     portfolio_defs <- portfolio_df %>%
       dplyr::group_by(date) %>%
       dplyr::summarise(

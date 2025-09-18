@@ -1,8 +1,7 @@
 # R/utils_portfolio.R
 
-
 #' Main calculation function for selected portfolios and benchmarks
-run_portfolio_calculations <- function(portfolios, selected_portfolios, show_sp500 = TRUE, show_btc = TRUE) {
+calculate_all_portfolios <- function(portfolios, selected_portfolios, show_sp500 = TRUE, show_btc = TRUE) {
   if (length(portfolios) == 0 || length(selected_portfolios) == 0) return(NULL)
 
   calculated_portfolios <- list()
@@ -24,15 +23,22 @@ run_portfolio_calculations <- function(portfolios, selected_portfolios, show_sp5
           cumulative_returns = cumulative_returns,
           individual_stocks = perf_data$individual_stocks
         )
+      } else {
+        warning(paste("Could not calculate performance for portfolio:", name))
       }
     }
   }
 
   fetch_benchmark <- function(symbol, start) {
-    raw <- fetch_stock_data(symbol, start_date = start_date)$data[[symbol]]
-    if (is.null(raw)) return(NULL)
-    returns <- calculate_returns(raw, "symbol")
-    list(dates = returns$date, cumulative_returns = returns$cumulative_return - 1)
+    raw_data <- fetch_stock_data(symbol, start_date = start)
+    if (is.null(raw_data) || nrow(raw_data) == 0) return(NULL)
+    
+    # Calculate cumulative return for the benchmark
+    initial_price <- raw_data$adjusted_price[1]
+    raw_data <- raw_data %>%
+      mutate(cumulative_return = (adjusted_price / initial_price) - 1)
+      
+    list(dates = raw_data$date, cumulative_returns = raw_data$cumulative_return)
   }
 
   list(

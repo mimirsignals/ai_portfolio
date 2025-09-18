@@ -66,18 +66,9 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
     
     # Get portfolio data based on performance module selections
     portfolio_data <- reactive({
-      req(performance_selections)
+      req(performance_selections())
       
-      selections <- performance_selections
-      if (is.null(selections) || !is.list(selections)) {
-        return(NULL)
-      }
-      
-      selected_portfolios <- if (is.function(selections$selected)) {
-        selections$selected()
-      } else {
-        selections$selected
-      }
+      selected_portfolios <- performance_selections()
       
       if (length(selected_portfolios) == 0) {
         return(NULL)
