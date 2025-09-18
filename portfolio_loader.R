@@ -1,35 +1,27 @@
 # R/portfolio_loader.R
 
-#' Load and process portfolios from a CSV file
+#' Load and process portfolios from an Excel file
 #'
-#' Reads a CSV where each unique date signifies a distinct portfolio version.
-#' It handles comma decimal separators for weights.
+#' Reads an Excel file where each unique date signifies a distinct portfolio version.
 #'
-#' @param file_path Path to the CSV file.
+#' @param file_path Path to the Excel file.
 #' @param initial_investment The initial investment amount.
 #' @return A named list of portfolio definitions, sorted by date.
-load_portfolios_from_csv <- function(file_path, initial_investment = 10000) {
+load_portfolios_from_excel <- function(file_path, initial_investment = 10000) {
   if (!file.exists(file_path)) {
     shiny::showNotification(paste("Portfolio file not found:", file_path), type = "error")
     return(list())
   }
   
   tryCatch({
-    portfolio_df <- readr::read_csv(
-      file_path,
-      locale = readr::locale(decimal_mark = ","),
-      col_types = readr::cols(
-        date = readr::col_date(format = "%Y-%m-%d"),
-        symbol = readr::col_character(),
-        weight = readr::col_double()
-      )
-    )
+    # Use readxl to read the Excel file
+    portfolio_df <- readxl::read_excel(file_path)
 
     portfolio_defs <- portfolio_df %>%
       dplyr::group_by(date) %>%
       dplyr::summarise(
         symbols = list(symbol),
-        weights = list(weight),
+        weights = list(as.numeric(weight)),
         .groups = "drop"
       ) %>%
       dplyr::arrange(date)

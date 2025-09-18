@@ -22,7 +22,8 @@ ui <- dashboardPage(
 
 server <- function(input, output, session) {
   portfolios_reactive <- reactive({
-    load_portfolios_from_csv("portfolio.xlsx - Sheet1.csv")
+    # Make sure you are calling the new function
+    load_portfolios_from_excel("portfolio.xlsx")
   })
   
   portfolio_calc <- run_portfolio_calculations

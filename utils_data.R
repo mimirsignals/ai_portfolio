@@ -11,7 +11,7 @@ library(lubridate)
 #' @param total_investment Total investment amount
 #' @param portfolio_name Name of portfolio (for identification)
 #' @return List containing portfolio_tbl and individual_stocks data
-calculate_portfolio_performance <- function(symbols, weights, start_date, total_investment, portfolio_name = "Portfolio") {
+run_portfolio_calculations <- function(symbols, weights, start_date, total_investment, portfolio_name = "Portfolio") {
   
   # Input validation
   if (length(symbols) == 0 || length(weights) == 0) {
