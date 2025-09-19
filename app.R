@@ -31,7 +31,7 @@ server <- function(input, output, session) {
 
   performance_selections <- performanceServer("performance", portfolios_reactive, portfolio_calc)
   riskServer("risk", portfolios_reactive, portfolio_calc, performance_selections)
-  holdingsServer("holdings", portfolios_reactive, portfolio_calc, performance_selections)
+  holdingsServer("holdings", portfolios_reactive, portfolio_calc)
 }
 
 shinyApp(ui = ui, server = server)
