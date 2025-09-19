@@ -395,12 +395,13 @@ calculate_all_portfolios_with_inheritance <- function(portfolios, selected_portf
   if (length(portfolios) == 0 || length(selected_portfolios) == 0) return(NULL)
 
   calculated_portfolios <- list()
-  earliest_date <- Sys.Date()
+  
+  # FIX: Calculate earliest_date from ALL portfolios, not just selected ones
+  earliest_date <- min(sapply(portfolios, function(p) p$start_date))
 
   for (name in selected_portfolios) {
     if (name %in% names(portfolios)) {
       p_def <- portfolios[[name]]
-      earliest_date <- min(earliest_date, p_def$start_date)
       
       # Pass all portfolios for inheritance detection
       perf_data <- run_portfolio_calculations_with_inheritance(
