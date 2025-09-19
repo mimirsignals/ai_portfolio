@@ -1,4 +1,4 @@
-# mod_holdings.R - Fixed Holdings Module
+# mod_holdings.R - Fixed Holdings Module with Enhanced Data Validation
 
 #' Holdings Module UI
 #' @param id Module namespace ID
@@ -56,6 +56,37 @@ holdingsUI <- function(id) {
   )
 }
 
+#' Helper function to safely validate and convert investment data
+#' @param data Data frame containing investment column
+#' @return Cleaned data frame with numeric investment column
+safe_validate_investment_data <- function(data) {
+  if (is.null(data) || nrow(data) == 0) {
+    return(data.frame())
+  }
+  
+  tryCatch({
+    data %>%
+      mutate(
+        # Ensure proper data types
+        investment = as.numeric(as.character(investment)),
+        symbol = as.character(symbol),
+        date = as.Date(date)
+      ) %>%
+      # Filter out invalid data
+      filter(
+        !is.na(investment),
+        is.finite(investment),
+        investment > 0,
+        !is.na(symbol),
+        symbol != "",
+        !is.na(date)
+      )
+  }, error = function(e) {
+    warning(paste("Error validating investment data:", e$message))
+    return(data.frame())
+  })
+}
+
 #' Holdings Module Server
 #' @param id Module namespace ID
 #' @param portfolios_reactive Reactive expression containing portfolio data
@@ -106,35 +137,53 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
         current_name <- names(data$portfolios)[1]
         current_portfolio <- data$portfolios[[current_name]]
         
-        # Get individual stock data
+        # Get individual stock data with validation
         if (is.null(current_portfolio$individual_stocks) || 
             nrow(current_portfolio$individual_stocks) == 0) {
           return(plotly_empty("No individual stock data available"))
         }
         
-        # Get final values for each stock with proper data validation
-        holdings_data <- current_portfolio$individual_stocks %>%
-          mutate(
-            investment = as.numeric(investment),
-            symbol = as.character(symbol)
-          ) %>%
-          filter(is.finite(investment), investment > 0) %>%
+        # Safe data validation and processing
+        holdings_data <- safe_validate_investment_data(current_portfolio$individual_stocks)
+        
+        if (nrow(holdings_data) == 0) {
+          return(plotly_empty("No valid holdings data after validation"))
+        }
+        
+        # Get final values for each stock
+        holdings_summary <- holdings_data %>%
           group_by(symbol) %>%
+          arrange(date) %>%
           slice_tail(n = 1) %>%
           ungroup() %>%
           select(symbol, investment) %>%
           arrange(desc(investment))
         
-        if (nrow(holdings_data) == 0) {
+        if (nrow(holdings_summary) == 0) {
           return(plotly_empty("No valid holdings data"))
         }
         
-        # Ensure data types for plotly
-        holdings_data$symbol <- as.character(holdings_data$symbol)
-        holdings_data$investment <- as.numeric(holdings_data$investment)
+        # Final validation for plotly
+        holdings_summary <- holdings_summary %>%
+          mutate(
+            symbol = as.character(symbol),
+            investment = as.numeric(investment)
+          ) %>%
+          filter(
+            !is.na(symbol),
+            symbol != "",
+            !is.na(investment),
+            is.finite(investment),
+            investment > 0
+          )
         
+        if (nrow(holdings_summary) == 0) {
+          return(plotly_empty("No valid data for pie chart"))
+        }
+        
+        # Create pie chart
         plot_ly(
-          holdings_data,
+          holdings_summary,
           labels = ~symbol,
           values = ~investment,
           type = 'pie',
@@ -142,7 +191,7 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
                          "Value: $%{value:,.0f}<br>" +
                          "Percentage: %{percent}<br>" +
                          "<extra></extra>",
-          marker = list(colors = RColorBrewer::brewer.pal(n = min(nrow(holdings_data), 11), name = "Spectral"))
+          marker = list(colors = RColorBrewer::brewer.pal(n = min(nrow(holdings_summary), 11), name = "Spectral"))
         ) %>%
           layout(
             title = paste("Current Portfolio Holdings:", current_name),
@@ -171,30 +220,36 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
           if (!is.null(portfolio$individual_stocks) && 
               nrow(portfolio$individual_stocks) > 0) {
             
-            # Get final weights for each symbol
-            final_holdings <- portfolio$individual_stocks %>%
-              mutate(
-                investment = as.numeric(investment),
-                symbol = as.character(symbol)
-              ) %>%
-              filter(is.finite(investment), investment > 0) %>%
-              group_by(symbol) %>%
-              slice_tail(n = 1) %>%
-              ungroup()
+            # Safe data validation
+            validated_data <- safe_validate_investment_data(portfolio$individual_stocks)
             
-            if (nrow(final_holdings) > 0) {
-              total_value <- sum(final_holdings$investment, na.rm = TRUE)
-              if (total_value > 0) {
-                final_holdings$weight <- final_holdings$investment / total_value
-                
-                temp_data <- data.frame(
-                  portfolio = as.character(portfolio_name),
-                  symbol = as.character(final_holdings$symbol),
-                  weight = as.numeric(final_holdings$weight) * 100,  # Convert to percentage
-                  stringsAsFactors = FALSE
-                )
-                
-                comparison_data <- rbind(comparison_data, temp_data)
+            if (nrow(validated_data) > 0) {
+              # Get final weights for each symbol
+              final_holdings <- validated_data %>%
+                group_by(symbol) %>%
+                arrange(date) %>%
+                slice_tail(n = 1) %>%
+                ungroup()
+              
+              if (nrow(final_holdings) > 0) {
+                total_value <- sum(final_holdings$investment, na.rm = TRUE)
+                if (total_value > 0) {
+                  temp_data <- final_holdings %>%
+                    mutate(
+                      weight = (investment / total_value) * 100,
+                      portfolio = as.character(portfolio_name)
+                    ) %>%
+                    select(portfolio, symbol, weight) %>%
+                    filter(
+                      !is.na(weight),
+                      is.finite(weight),
+                      weight > 0
+                    )
+                  
+                  if (nrow(temp_data) > 0) {
+                    comparison_data <- rbind(comparison_data, temp_data)
+                  }
+                }
               }
             }
           }
@@ -204,10 +259,26 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
           return(plotly_empty("No comparison data available"))
         }
         
-        # Ensure proper data types
-        comparison_data$portfolio <- as.character(comparison_data$portfolio)
-        comparison_data$symbol <- as.character(comparison_data$symbol)
-        comparison_data$weight <- as.numeric(comparison_data$weight)
+        # Final data type validation for plotly
+        comparison_data <- comparison_data %>%
+          mutate(
+            portfolio = as.character(portfolio),
+            symbol = as.character(symbol),
+            weight = as.numeric(weight)
+          ) %>%
+          filter(
+            !is.na(portfolio),
+            portfolio != "",
+            !is.na(symbol),
+            symbol != "",
+            !is.na(weight),
+            is.finite(weight),
+            weight > 0
+          )
+        
+        if (nrow(comparison_data) == 0) {
+          return(plotly_empty("No valid comparison data"))
+        }
         
         # Create grouped bar chart
         plot_ly(
@@ -250,35 +321,53 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
           return(plotly_empty("No individual stock data available"))
         }
         
-        # Prepare stock performance data with proper validation
-        stock_data <- current_portfolio$individual_stocks %>%
-          mutate(
-            date = as.Date(date),
-            investment = as.numeric(investment),
-            symbol = as.character(symbol)
-          ) %>%
-          filter(is.finite(investment), investment > 0, !is.na(date)) %>%
+        # Safe data validation and processing
+        validated_data <- safe_validate_investment_data(current_portfolio$individual_stocks)
+        
+        if (nrow(validated_data) == 0) {
+          return(plotly_empty("No valid stock data after validation"))
+        }
+        
+        # Prepare stock performance data
+        stock_data <- validated_data %>%
+          arrange(symbol, date) %>%
           group_by(symbol) %>%
-          arrange(date) %>%
           mutate(
             initial_investment = first(investment),
-            return_pct = if (first(investment) > 0) {
+            return_pct = if (!is.na(first(investment)) && first(investment) > 0) {
               (investment / first(investment) - 1) * 100
             } else {
-              0
+              NA_real_
             }
           ) %>%
           ungroup() %>%
-          filter(is.finite(return_pct))
+          filter(
+            !is.na(return_pct),
+            is.finite(return_pct)
+          )
         
         if (nrow(stock_data) == 0) {
           return(plotly_empty("No valid stock performance data"))
         }
         
-        # Ensure proper data types for plotly
-        stock_data$date <- as.Date(stock_data$date)
-        stock_data$return_pct <- as.numeric(stock_data$return_pct)
-        stock_data$symbol <- as.character(stock_data$symbol)
+        # Final data type validation for plotly
+        stock_data <- stock_data %>%
+          mutate(
+            date = as.Date(date),
+            return_pct = as.numeric(return_pct),
+            symbol = as.character(symbol)
+          ) %>%
+          filter(
+            !is.na(date),
+            !is.na(return_pct),
+            is.finite(return_pct),
+            !is.na(symbol),
+            symbol != ""
+          )
+        
+        if (nrow(stock_data) == 0) {
+          return(plotly_empty("No valid data for performance chart"))
+        }
         
         # Create color palette
         n_stocks <- length(unique(stock_data$symbol))
@@ -326,23 +415,33 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
           if (!is.null(portfolio$individual_stocks) && 
               nrow(portfolio$individual_stocks) > 0) {
             
-            # Get final values for each stock
-            final_holdings <- portfolio$individual_stocks %>%
-              filter(is.finite(investment), investment > 0) %>%
-              group_by(symbol) %>%
-              summarise(
-                initial_investment = first(investment),
-                final_investment = last(investment),
-                .groups = 'drop'
-              ) %>%
-              filter(initial_investment > 0) %>%
-              mutate(
-                total_return = (final_investment / initial_investment - 1) * 100,
-                portfolio = portfolio_name
-              )
+            # Safe data validation
+            validated_data <- safe_validate_investment_data(portfolio$individual_stocks)
             
-            if (nrow(final_holdings) > 0) {
-              holdings_summary <- rbind(holdings_summary, final_holdings)
+            if (nrow(validated_data) > 0) {
+              # Get final values for each stock
+              final_holdings <- validated_data %>%
+                group_by(symbol) %>%
+                arrange(date) %>%
+                summarise(
+                  initial_investment = first(investment),
+                  final_investment = last(investment),
+                  .groups = 'drop'
+                ) %>%
+                filter(
+                  !is.na(initial_investment),
+                  !is.na(final_investment),
+                  initial_investment > 0,
+                  final_investment > 0
+                ) %>%
+                mutate(
+                  total_return = (final_investment / initial_investment - 1) * 100,
+                  portfolio = as.character(portfolio_name)
+                )
+              
+              if (nrow(final_holdings) > 0) {
+                holdings_summary <- rbind(holdings_summary, final_holdings)
+              }
             }
           }
         }
@@ -364,8 +463,14 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
           ) %>%
           ungroup() %>%
           select(portfolio, symbol, weight, initial_investment, final_investment, total_return) %>%
+          filter(
+            !is.na(weight),
+            is.finite(weight),
+            weight >= 0
+          ) %>%
           arrange(portfolio, desc(weight))
         
+        # Create the data table
         DT::datatable(
           holdings_summary,
           options = list(
