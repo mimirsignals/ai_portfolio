@@ -46,7 +46,7 @@ calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_inv
       
       # FIX: Corrected the filter condition
       symbol_data <- stock_data %>%
-        filter(symbol == current_symbol) %>%  # FIXED: was filter(symbol == !symbol)
+        filter(symbol == current_symbol) %>% 
         arrange(date)
       
       if (nrow(symbol_data) > 0) {
@@ -287,7 +287,7 @@ fetch_stock_data <- function(symbols, start_date) {
     })
     
     # Small delay to be nice to data providers
-    Sys.sleep(0.1)
+    Sys.sleep(0.01)
   }
   
   if (nrow(all_stock_data) == 0) {
