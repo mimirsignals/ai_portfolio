@@ -56,6 +56,19 @@ holdingsUI <- function(id) {
   )
 }
 
+#' Helper function to safely validate and convert numeric data
+#' @param x Vector to convert to numeric
+#' @return Numeric vector with proper conversion
+safe_numeric_convert <- function(x) {
+  if (is.null(x)) return(numeric(0))
+  
+  # Convert to numeric with proper handling of character/factor inputs
+  x_numeric <- suppressWarnings(as.numeric(as.character(x)))
+  
+  # Return the numeric vector
+  return(x_numeric)
+}
+
 #' Helper function to safely validate and convert investment data
 #' @param data Data frame containing investment column
 #' @return Cleaned data frame with numeric investment column
@@ -67,8 +80,8 @@ safe_validate_investment_data <- function(data) {
   tryCatch({
     data %>%
       mutate(
-        # Ensure proper data types
-        investment = as.numeric(as.character(investment)),
+        # Ensure proper data types with European decimal conversion
+        investment = safe_numeric_convert(investment),
         symbol = as.character(symbol),
         date = as.Date(date)
       ) %>%
@@ -109,7 +122,7 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
         portfolio_calc(
           portfolios = portfolios_reactive(),
           selected_portfolios = selected_portfolios,
-          show_sp500 = FALSE,  # Don't need benchmarks for holdings analysis
+          show_sp500 = FALSE,  # Don't need benchmarks for holdings
           show_btc = FALSE
         )
       }, error = function(e) {
@@ -150,13 +163,22 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
           return(plotly_empty("No valid holdings data after validation"))
         }
         
-        # Get final values for each stock
+        # Get final values for each stock with proper numeric conversion
         holdings_summary <- holdings_data %>%
           group_by(symbol) %>%
           arrange(date) %>%
           slice_tail(n = 1) %>%
           ungroup() %>%
+          mutate(
+            # Ensure numeric conversion with European decimal handling
+            investment = safe_numeric_convert(investment)
+          ) %>%
           select(symbol, investment) %>%
+          filter(
+            !is.na(investment),
+            is.finite(investment),
+            investment > 0
+          ) %>%
           arrange(desc(investment))
         
         if (nrow(holdings_summary) == 0) {
@@ -167,7 +189,7 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
         holdings_summary <- holdings_summary %>%
           mutate(
             symbol = as.character(symbol),
-            investment = as.numeric(investment)
+            investment = safe_numeric_convert(investment)
           ) %>%
           filter(
             !is.na(symbol),
@@ -190,53 +212,62 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
           hovertemplate = "<b>%{label}</b><br>" +
                          "Value: $%{value:,.0f}<br>" +
                          "Percentage: %{percent}<br>" +
-                         "<extra></extra>",
-          marker = list(colors = RColorBrewer::brewer.pal(n = min(nrow(holdings_summary), 11), name = "Spectral"))
+                         "<extra></extra>"
         ) %>%
           layout(
-            title = paste("Current Portfolio Holdings:", current_name),
-            showlegend = TRUE,
-            legend = list(orientation = "v", x = 1.02, y = 0.5)
+            title = paste("Current Holdings -", current_name),
+            showlegend = TRUE
           )
       }, error = function(e) {
         plotly_empty(paste("Pie chart error:", e$message))
       })
     })
     
-    # Holdings comparison chart (if multiple portfolios selected)
+    # Portfolio holdings comparison chart
     output$comparison_chart <- renderPlotly({
       data <- portfolio_data()
       if (is.null(data) || length(data$portfolios) <= 1) {
-        return(plotly_empty("Select historical portfolios to compare"))
+        return(plotly_empty("Need at least 2 portfolios for comparison"))
       }
       
       tryCatch({
-        # Prepare comparison data
         comparison_data <- data.frame()
         
         for (portfolio_name in names(data$portfolios)) {
           portfolio <- data$portfolios[[portfolio_name]]
           
-          if (!is.null(portfolio$individual_stocks) && 
-              nrow(portfolio$individual_stocks) > 0) {
+          if (!is.null(portfolio$individual_stocks) && nrow(portfolio$individual_stocks) > 0) {
             
-            # Safe data validation
-            validated_data <- safe_validate_investment_data(portfolio$individual_stocks)
+            # Safe validation of individual stocks data
+            validated_stocks <- safe_validate_investment_data(portfolio$individual_stocks)
             
-            if (nrow(validated_data) > 0) {
-              # Get final weights for each symbol
-              final_holdings <- validated_data %>%
+            if (nrow(validated_stocks) > 0) {
+              
+              # Get final holdings with proper numeric conversion
+              final_holdings <- validated_stocks %>%
                 group_by(symbol) %>%
                 arrange(date) %>%
                 slice_tail(n = 1) %>%
-                ungroup()
+                ungroup() %>%
+                mutate(
+                  investment = safe_numeric_convert(investment)
+                ) %>%
+                filter(
+                  !is.na(investment),
+                  is.finite(investment),
+                  investment > 0
+                )
               
               if (nrow(final_holdings) > 0) {
-                total_value <- sum(final_holdings$investment, na.rm = TRUE)
+                # Calculate total value with proper numeric handling
+                total_value <- sum(safe_numeric_convert(final_holdings$investment), na.rm = TRUE)
+                
                 if (total_value > 0) {
                   temp_data <- final_holdings %>%
                     mutate(
-                      weight = (investment / total_value) * 100,
+                      # Ensure all calculations use proper numeric values
+                      investment = safe_numeric_convert(investment),
+                      weight = (safe_numeric_convert(investment) / total_value) * 100,
                       portfolio = as.character(portfolio_name)
                     ) %>%
                     select(portfolio, symbol, weight) %>%
@@ -259,12 +290,12 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
           return(plotly_empty("No comparison data available"))
         }
         
-        # Final data type validation for plotly
+        # Final data type validation for plotly with European decimal handling
         comparison_data <- comparison_data %>%
           mutate(
             portfolio = as.character(portfolio),
             symbol = as.character(symbol),
-            weight = as.numeric(weight)
+            weight = safe_numeric_convert(weight)
           ) %>%
           filter(
             !is.na(portfolio),
@@ -308,11 +339,11 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
     output$stock_performance_chart <- renderPlotly({
       data <- portfolio_data()
       if (is.null(data) || length(data$portfolios) == 0) {
-        return(plotly_empty("No portfolio data available"))
+        return(plotly_empty("No portfolio data for stock performance"))
       }
       
       tryCatch({
-        # Use current portfolio for individual stock performance
+        # Get current portfolio data
         current_name <- names(data$portfolios)[1]
         current_portfolio <- data$portfolios[[current_name]]
         
@@ -321,126 +352,101 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
           return(plotly_empty("No individual stock data available"))
         }
         
-        # Safe data validation and processing
-        validated_data <- safe_validate_investment_data(current_portfolio$individual_stocks)
-        
-        if (nrow(validated_data) == 0) {
-          return(plotly_empty("No valid stock data after validation"))
-        }
-        
-        # Prepare stock performance data
-        stock_data <- validated_data %>%
-          arrange(symbol, date) %>%
-          group_by(symbol) %>%
-          mutate(
-            initial_investment = first(investment),
-            return_pct = if (!is.na(first(investment)) && first(investment) > 0) {
-              (investment / first(investment) - 1) * 100
-            } else {
-              NA_real_
-            }
-          ) %>%
-          ungroup() %>%
-          filter(
-            !is.na(return_pct),
-            is.finite(return_pct)
-          )
+        # Safe validation and processing
+        stock_data <- safe_validate_investment_data(current_portfolio$individual_stocks)
         
         if (nrow(stock_data) == 0) {
           return(plotly_empty("No valid stock performance data"))
         }
         
-        # Final data type validation for plotly
+        # Ensure all numeric conversions are properly handled
         stock_data <- stock_data %>%
           mutate(
+            investment = safe_numeric_convert(investment),
             date = as.Date(date),
-            return_pct = as.numeric(return_pct),
             symbol = as.character(symbol)
           ) %>%
           filter(
+            !is.na(investment),
+            is.finite(investment),
             !is.na(date),
-            !is.na(return_pct),
-            is.finite(return_pct),
             !is.na(symbol),
             symbol != ""
           )
         
         if (nrow(stock_data) == 0) {
-          return(plotly_empty("No valid data for performance chart"))
+          return(plotly_empty("No valid stock data after processing"))
         }
         
-        # Create color palette
-        n_stocks <- length(unique(stock_data$symbol))
-        colors <- RColorBrewer::brewer.pal(n = min(max(n_stocks, 3), 11), name = "Set3")
-        
+        # Create line chart
         plot_ly(
           stock_data,
           x = ~date,
-          y = ~return_pct,
+          y = ~investment,
           color = ~symbol,
-          colors = colors,
           type = 'scatter',
-          mode = 'lines',
+          mode = 'lines+markers',
           hovertemplate = "<b>%{fullData.name}</b><br>" +
                          "Date: %{x}<br>" +
-                         "Return: %{y:.2f}%<br>" +
+                         "Value: $%{y:,.0f}<br>" +
                          "<extra></extra>"
         ) %>%
           layout(
-            title = "Individual Stock Performance",
+            title = "Individual Stock Performance Over Time",
             xaxis = list(title = "Date"),
-            yaxis = list(title = "Return (%)"),
-            hovermode = 'x unified',
+            yaxis = list(title = "Investment Value ($)"),
             legend = list(orientation = "h", x = 0, y = -0.2)
           )
       }, error = function(e) {
-        plotly_empty(paste("Stock performance error:", e$message))
+        plotly_empty(paste("Stock performance chart error:", e$message))
       })
     })
     
     # Holdings details table
-    output$holdings_table <- renderDT({
+    output$holdings_table <- DT::renderDataTable({
       data <- portfolio_data()
       if (is.null(data) || length(data$portfolios) == 0) {
-        return(data.frame(Message = "No portfolio data available"))
+        return(data.frame(Message = "No holdings data to display"))
       }
       
       tryCatch({
-        # Create comprehensive holdings table for all selected portfolios
         holdings_summary <- data.frame()
         
         for (portfolio_name in names(data$portfolios)) {
           portfolio <- data$portfolios[[portfolio_name]]
           
-          if (!is.null(portfolio$individual_stocks) && 
-              nrow(portfolio$individual_stocks) > 0) {
+          if (!is.null(portfolio$individual_stocks) && nrow(portfolio$individual_stocks) > 0) {
             
-            # Safe data validation
-            validated_data <- safe_validate_investment_data(portfolio$individual_stocks)
+            # Safe validation
+            validated_stocks <- safe_validate_investment_data(portfolio$individual_stocks)
             
-            if (nrow(validated_data) > 0) {
-              # Get final values for each stock
-              final_holdings <- validated_data %>%
+            if (nrow(validated_stocks) > 0) {
+              
+              # Get initial and final values with proper numeric conversion
+              stock_summary <- validated_stocks %>%
                 group_by(symbol) %>%
                 arrange(date) %>%
                 summarise(
-                  initial_investment = first(investment),
-                  final_investment = last(investment),
+                  initial_investment = safe_numeric_convert(first(investment)),
+                  final_investment = safe_numeric_convert(last(investment)),
                   .groups = 'drop'
                 ) %>%
                 filter(
                   !is.na(initial_investment),
                   !is.na(final_investment),
+                  is.finite(initial_investment),
+                  is.finite(final_investment),
                   initial_investment > 0,
                   final_investment > 0
                 ) %>%
                 mutate(
-                  total_return = (final_investment / initial_investment - 1) * 100,
+                  # Calculate return with proper numeric handling
+                  total_return = (safe_numeric_convert(final_investment) / safe_numeric_convert(initial_investment) - 1) * 100,
                   portfolio = as.character(portfolio_name)
                 )
               
-              if (nrow(final_holdings) > 0) {
-                holdings_summary <- rbind(holdings_summary, final_holdings)
+              if (nrow(stock_summary) > 0) {
+                holdings_summary <- rbind(holdings_summary, stock_summary)
               }
             }
           }
@@ -450,16 +456,14 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, performance_
           return(data.frame(Message = "No holdings data to display"))
         }
         
-        # Calculate total portfolio values and weights
+        # Calculate total portfolio values and weights with proper numeric handling
         holdings_summary <- holdings_summary %>%
           group_by(portfolio) %>%
           mutate(
-            portfolio_total = sum(final_investment, na.rm = TRUE),
-            weight = if (portfolio_total > 0) {
-              (final_investment / portfolio_total) * 100
-            } else {
-              0
-            }
+            portfolio_total = sum(safe_numeric_convert(final_investment), na.rm = TRUE),
+            weight = ifelse(portfolio_total > 0, 
+                          (safe_numeric_convert(final_investment) / portfolio_total) * 100, 
+                          0)
           ) %>%
           ungroup() %>%
           select(portfolio, symbol, weight, initial_investment, final_investment, total_return) %>%
