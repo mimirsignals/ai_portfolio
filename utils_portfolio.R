@@ -36,7 +36,7 @@ calculate_all_portfolios <- function(portfolios, selected_portfolios, show_sp500
     # Calculate cumulative return for the benchmark
     initial_price <- raw_data$adjusted_price[1]
     raw_data <- raw_data %>%
-      mutate(cumulative_return = (adjusted_price / initial_price) - 1)
+      dplyr::mutate(cumulative_return = (adjusted_price / initial_price) - 1)
       
     list(dates = raw_data$date, cumulative_returns = raw_data$cumulative_return)
   }
@@ -53,41 +53,79 @@ calculate_all_portfolios <- function(portfolios, selected_portfolios, show_sp500
 calculate_all_portfolios_with_inheritance <- function(portfolios, selected_portfolios, show_sp500 = TRUE, show_btc = TRUE) {
   if (length(portfolios) == 0 || length(selected_portfolios) == 0) return(NULL)
 
-  calculated_portfolios <- list()
-  earliest_date <- Sys.Date()
+  available <- intersect(selected_portfolios, names(portfolios))
+  if (length(available) == 0) return(NULL)
 
-  for (name in selected_portfolios) {
-    if (name %in% names(portfolios)) {
-      p_def <- portfolios[[name]]
-      earliest_date <- min(earliest_date, p_def$start_date)
-      
-      # Pass all portfolios for inheritance detection
-      perf_data <- run_portfolio_calculations_with_inheritance(
-        p_def$symbols, p_def$weights, p_def$start_date, p_def$total_investment, name, portfolios
-      )
-      
-      if (!is.null(perf_data)) {
-        cumulative_returns <- (perf_data$portfolio_tbl$investment / p_def$total_investment) - 1
-        calculated_portfolios[[name]] <- list(
-          dates = perf_data$portfolio_tbl$date,
-          cumulative_returns = cumulative_returns,
-          individual_stocks = perf_data$individual_stocks
-        )
-      } else {
-        warning(paste("Could not calculate performance for portfolio:", name))
+  portfolio_groups <- split(available, vapply(portfolios[available], function(p) p$portfolio_name, character(1)))
+
+  group_earliest <- lapply(portfolio_groups, function(keys) {
+    dates <- vapply(keys, function(key) as.Date(portfolios[[key]]$start_date), as.Date(Sys.Date()))
+    min(dates, na.rm = TRUE)
+  })
+
+  earliest_by_group <- vapply(group_earliest, identity, as.Date(Sys.Date()))
+  earliest_date <- min(earliest_by_group, na.rm = TRUE)
+
+  calculated_portfolios <- list()
+
+  for (name in available) {
+    p_def <- portfolios[[name]]
+
+    perf_data <- run_portfolio_calculations_with_inheritance(
+      p_def$symbols, p_def$weights, p_def$start_date, p_def$total_investment, name, portfolios
+    )
+
+    if (!is.null(perf_data)) {
+      perf_tbl <- perf_data$portfolio_tbl %>%
+        dplyr::mutate(date = as.Date(date)) %>%
+        dplyr::arrange(date)
+
+      earliest_group_date <- earliest_by_group[[portfolios[[name]]$portfolio_name]]
+      perf_tbl <- perf_data$portfolio_tbl %>%
+        dplyr::mutate(date = as.Date(date)) %>%
+        dplyr::arrange(date)
+
+      keep <- perf_tbl$date >= earliest_group_date
+      perf_tbl <- perf_tbl[keep, , drop = FALSE]
+
+      if (nrow(perf_tbl) == 0) {
+        warning(paste("No performance data after earliest group date for portfolio:", name))
+        next
       }
+
+      baseline <- perf_tbl$investment[1]
+      if (is.na(baseline) || baseline == 0) {
+        warning(paste("Baseline investment missing at earliest group date for portfolio:", name))
+        next
+      }
+
+      cumulative_returns <- (perf_tbl$investment / baseline) - 1
+
+      individual_stocks <- perf_data$individual_stocks
+      if (!is.null(individual_stocks)) {
+        individual_stocks <- individual_stocks %>%
+          dplyr::mutate(date = as.Date(date)) %>%
+          dplyr::filter(date >= earliest_group_date)
+      }
+
+      calculated_portfolios[[name]] <- list(
+        dates = perf_tbl$date,
+        cumulative_returns = cumulative_returns,
+        individual_stocks = individual_stocks
+      )
+    } else {
+      warning(paste("Could not calculate performance for portfolio:", name))
     }
   }
 
-  # Benchmark calculation (same as existing function)
   fetch_benchmark <- function(symbol, start) {
     raw_data <- fetch_stock_data(symbol, start_date = start)
     if (is.null(raw_data) || nrow(raw_data) == 0) return(NULL)
-    
+
     initial_price <- raw_data$adjusted_price[1]
     raw_data <- raw_data %>%
-      mutate(cumulative_return = (adjusted_price / initial_price) - 1)
-      
+      dplyr::mutate(cumulative_return = (adjusted_price / initial_price) - 1)
+
     list(dates = raw_data$date, cumulative_returns = raw_data$cumulative_return)
   }
 
@@ -390,55 +428,5 @@ run_portfolio_calculations_with_inheritance <- function(symbols, weights, start_
   })
 }
 
-#' Enhanced calculation function with portfolio inheritance support - COMPLETE
-calculate_all_portfolios_with_inheritance <- function(portfolios, selected_portfolios, show_sp500 = TRUE, show_btc = TRUE) {
-  if (length(portfolios) == 0 || length(selected_portfolios) == 0) return(NULL)
 
-  calculated_portfolios <- list()
-  
-  # FIX: Calculate earliest_date from ALL portfolios, not just selected ones
-  earliest_date <- min(sapply(portfolios, function(p) p$start_date))
 
-  for (name in selected_portfolios) {
-    if (name %in% names(portfolios)) {
-      p_def <- portfolios[[name]]
-      
-      # Pass all portfolios for inheritance detection
-      perf_data <- run_portfolio_calculations_with_inheritance(
-        p_def$symbols, p_def$weights, p_def$start_date, p_def$total_investment, name, portfolios
-      )
-      
-      if (!is.null(perf_data)) {
-        # Calculate cumulative returns based on the FIRST portfolio's initial investment
-        first_portfolio_investment <- portfolios[[1]]$total_investment
-        cumulative_returns <- (perf_data$portfolio_tbl$investment / first_portfolio_investment) - 1
-        
-        calculated_portfolios[[name]] <- list(
-          dates = perf_data$portfolio_tbl$date,
-          cumulative_returns = cumulative_returns,
-          individual_stocks = perf_data$individual_stocks
-        )
-      } else {
-        warning(paste("Could not calculate performance for portfolio:", name))
-      }
-    }
-  }
-
-  # Benchmark calculation
-  fetch_benchmark <- function(symbol, start) {
-    raw_data <- fetch_stock_data(symbol, start_date = start)
-    if (is.null(raw_data) || nrow(raw_data) == 0) return(NULL)
-    
-    initial_price <- raw_data$adjusted_price[1]
-    raw_data <- raw_data %>%
-      mutate(cumulative_return = (adjusted_price / initial_price) - 1)
-      
-    list(dates = raw_data$date, cumulative_returns = raw_data$cumulative_return)
-  }
-
-  list(
-    portfolios = calculated_portfolios,
-    sp500 = if (show_sp500) fetch_benchmark("^GSPC", earliest_date) else NULL,
-    bitcoin = if (show_btc) fetch_benchmark("BTC-USD", earliest_date) else NULL
-  )
-}

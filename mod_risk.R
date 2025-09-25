@@ -17,6 +17,15 @@ riskUI <- function(id) {
     ),
     fluidRow(
       box(
+        title = "Risk Alerts",
+        status = "warning",
+        solidHeader = TRUE,
+        width = 12,
+        uiOutput(ns("risk_alerts"))
+      )
+    ),
+    fluidRow(
+      box(
         title = "Daily Returns Distribution",
         status = "primary",
         solidHeader = TRUE,
@@ -96,24 +105,84 @@ riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_sele
       )
     })
 
+    output$risk_alerts <- renderUI({
+      metrics <- risk_metrics()
+      sel <- selection_state()
+      focus <- sel$selected_ids
+
+      if (is.null(metrics) || nrow(metrics) == 0) {
+        return(tags$p("No risk metrics available yet."))
+      }
+
+      focus_metrics <- metrics %>% dplyr::filter(Portfolio %in% focus)
+      if (nrow(focus_metrics) == 0) {
+        focus_metrics <- metrics %>% dplyr::filter(!(Portfolio %in% c("S&P 500", "Bitcoin")))
+      }
+
+      if (nrow(focus_metrics) == 0) {
+        focus_metrics <- metrics
+      }
+
+      alerts <- list()
+
+      for (i in seq_len(nrow(focus_metrics))) {
+        row <- focus_metrics[i, ]
+        label <- row$Portfolio
+
+        if (!is.na(row$Max_Drawdown) && row$Max_Drawdown <= -0.2) {
+          alerts[[length(alerts) + 1]] <- tags$li(sprintf("%s max drawdown is %.1f%% (monitor recovery plans).", label, row$Max_Drawdown * 100))
+        }
+        if (!is.na(row$VaR_95) && row$VaR_95 <= -0.03) {
+          alerts[[length(alerts) + 1]] <- tags$li(sprintf("%s 95%% VaR is %.1f%% (tail risk elevated).", label, row$VaR_95 * 100))
+        }
+        if (!is.na(row$Volatility) && row$Volatility >= 0.25) {
+          alerts[[length(alerts) + 1]] <- tags$li(sprintf("%s annualised volatility is %.1f%% (high volatility regime).", label, row$Volatility * 100))
+        }
+        if (!is.na(row$Downside_Deviation) && row$Downside_Deviation >= 0.18) {
+          alerts[[length(alerts) + 1]] <- tags$li(sprintf("%s downside deviation is %.1f%% (drawdowns becoming more persistent).", label, row$Downside_Deviation * 100))
+        }
+      }
+
+      if (length(alerts) == 0) {
+        tags$p("No alerts triggered for the selected portfolios.")
+      } else {
+        tags$ul(alerts)
+      }
+    })
+
     portfolio_data <- reactive({
       sel <- selection_state()
       selected_portfolios <- sel$selected_ids
+      metadata <- sel$metadata
 
       if (is.null(selected_portfolios) || length(selected_portfolios) == 0) {
         return(NULL)
       }
 
       tryCatch({
-        portfolio_calc(
+        result <- portfolio_calc(
           portfolios = portfolios_reactive(),
           selected_portfolios = selected_portfolios,
           show_sp500 = TRUE,
           show_btc = TRUE
         )
+        trim_portfolio_results(result, metadata)
       }, error = function(e) {
         warning(paste("Error in risk module portfolio calculation:", e$message))
         NULL
+      })
+    })
+
+    risk_metrics <- reactive({
+      data <- portfolio_data()
+      if (is.null(data)) return(data.frame())
+
+      tryCatch({
+        metrics <- calculate_risk_metrics(data)
+        if (is.null(metrics) || nrow(metrics) == 0) data.frame() else metrics
+      }, error = function(e) {
+        warning(paste("Risk metrics calculation error:", e$message))
+        data.frame()
       })
     })
 
@@ -198,295 +267,302 @@ riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_sele
     
     # Risk metrics summary table
     output$risk_metrics_table <- renderDT({
-      data <- portfolio_data()
-      if (is.null(data)) return(data.frame(Message = "No data available"))
-      
-      tryCatch({
-        metrics <- calculate_risk_metrics(data)
-        
-        if (nrow(metrics) == 0) {
-          return(data.frame(Message = "No risk metrics available"))
-        }
-        
-        DT::datatable(metrics, 
-                     options = list(
-                       dom = 't',
-                       pageLength = 20
-                     ),
-                     rownames = FALSE) %>%
-          DT::formatRound(columns = c("VaR_95", "CVaR_95"), digits = 3) %>%
-          DT::formatPercentage(columns = c("Volatility", "Downside_Deviation", "Max_Drawdown"), digits = 2)
-      }, error = function(e) {
-        data.frame(Error = paste("Risk metrics error:", e$message))
-      })
+      metrics <- risk_metrics()
+
+      if (is.null(metrics) || nrow(metrics) == 0) {
+        return(data.frame(Message = "No risk metrics available"))
+      }
+
+      DT::datatable(
+        metrics,
+        options = list(dom = 't', pageLength = 20),
+        rownames = FALSE
+      ) %>%
+        DT::formatPercentage(columns = c("Volatility", "Downside_Deviation", "VaR_95", "CVaR_95", "Max_Drawdown"), digits = 2)
     })
   })
 }
 
 # Helper functions for risk calculations
 
+compute_period_returns <- function(cumulative_returns) {
+  if (is.null(cumulative_returns)) return(numeric(0))
+  wealth <- 1 + as.numeric(cumulative_returns)
+  if (length(wealth) < 2) return(numeric(0))
+  wealth[-1] / wealth[-length(wealth)] - 1
+}
+
+trim_portfolio_results <- function(result, metadata) {
+  if (is.null(result)) return(result)
+  if (is.null(metadata) || nrow(metadata) == 0) return(result)
+
+  metadata <- metadata %>%
+    dplyr::filter(key %in% names(result$portfolios)) %>%
+    dplyr::mutate(start_date = as.Date(start_date)) %>%
+    dplyr::filter(!is.na(start_date))
+
+  if (nrow(metadata) == 0) return(result)
+
+  earliest_start <- min(metadata$start_date, na.rm = TRUE)
+
+  # Trim portfolios
+  for (portfolio_name in names(result$portfolios)) {
+    portfolio_info <- result$portfolios[[portfolio_name]]
+    start_row <- metadata %>% dplyr::filter(key == portfolio_name)
+    if (nrow(start_row) == 0) next
+    start_date <- as.Date(start_row$start_date[1])
+    if (is.na(start_date)) next
+
+    dates <- as.Date(portfolio_info$dates)
+    keep <- dates >= start_date
+    if (!any(keep, na.rm = TRUE)) next
+
+    result$portfolios[[portfolio_name]]$dates <- dates[keep]
+    result$portfolios[[portfolio_name]]$cumulative_returns <- portfolio_info$cumulative_returns[keep]
+
+    if (!is.null(portfolio_info$individual_stocks)) {
+      result$portfolios[[portfolio_name]]$individual_stocks <- portfolio_info$individual_stocks %>%
+        dplyr::mutate(date = as.Date(date)) %>%
+        dplyr::filter(date >= start_date)
+    }
+  }
+
+  # Trim benchmarks to earliest selected start date
+  trim_benchmark <- function(bench) {
+    if (is.null(bench)) return(NULL)
+    dates <- as.Date(bench$dates)
+    keep <- dates >= earliest_start
+    if (!any(keep, na.rm = TRUE)) return(NULL)
+    bench$dates <- dates[keep]
+    bench$cumulative_returns <- bench$cumulative_returns[keep]
+    bench
+  }
+
+  result$sp500 <- trim_benchmark(result$sp500)
+  result$bitcoin <- trim_benchmark(result$bitcoin)
+
+  result
+}
+
 #' Calculate daily returns for all portfolios and benchmarks
 calculate_all_returns <- function(data) {
   all_returns <- list()
-  
+
   process_returns <- function(series, name) {
     if (is.null(series) || length(series$cumulative_returns) < 2) return(NULL)
-    
-    # Calculate daily returns from cumulative returns using log differences
-    daily_returns <- c(0, diff(log1p(series$cumulative_returns))) * 100
-    
-    returns_df <- data.frame(
-      date = as.Date(series$dates),
-      daily_return = daily_returns,
-      type = name,
-      stringsAsFactors = FALSE
+
+    period_returns <- compute_period_returns(series$cumulative_returns)
+    if (length(period_returns) == 0) return(NULL)
+
+    dates <- as.Date(series$dates)
+    dates <- dates[-1]
+
+    returns_df <- tibble::tibble(
+      date = dates,
+      daily_return = period_returns * 100,
+      type = name
     ) %>%
-      filter(is.finite(daily_return), !is.na(daily_return))
-      
-    if (nrow(returns_df) > 0) {
-      return(returns_df)
-    }
-    return(NULL)
+      dplyr::filter(is.finite(daily_return), !is.na(daily_return))
+
+    if (nrow(returns_df) > 0) returns_df else NULL
   }
 
-  # Portfolio returns
   if (!is.null(data$portfolios) && length(data$portfolios) > 0) {
     for (portfolio_name in names(data$portfolios)) {
       all_returns[[portfolio_name]] <- process_returns(data$portfolios[[portfolio_name]], portfolio_name)
     }
   }
-  
-  # S&P 500 returns
+
   if (!is.null(data$sp500)) {
     all_returns[["S&P 500"]] <- process_returns(data$sp500, "S&P 500")
   }
-  
-  # Bitcoin returns
+
   if (!is.null(data$bitcoin)) {
     all_returns[["Bitcoin"]] <- process_returns(data$bitcoin, "Bitcoin")
   }
-  
-  return(all_returns)
+
+  all_returns
 }
 
 
 #' Calculate rolling volatility
+
+
+#' Calculate rolling volatility
 calculate_volatility <- function(data, window = 30) {
+  build_volatility <- function(series, name) {
+    if (is.null(series) || length(series$cumulative_returns) <= window) return(NULL)
+
+    period_returns <- compute_period_returns(series$cumulative_returns)
+    if (length(period_returns) < window) return(NULL)
+
+    dates <- as.Date(series$dates)
+    dates <- dates[-1]
+
+    vol_df <- tibble::tibble(
+      date = dates,
+      daily_return = period_returns
+    ) %>%
+      dplyr::filter(is.finite(daily_return)) %>%
+      dplyr::arrange(date)
+
+    if (nrow(vol_df) < window) return(NULL)
+
+    vol_df <- vol_df %>%
+      dplyr::mutate(
+        volatility = zoo::rollapply(daily_return, width = window, FUN = sd, fill = NA, align = "right") * sqrt(252) * 100,
+        type = name
+      ) %>%
+      dplyr::filter(!is.na(volatility), is.finite(volatility)) %>%
+      dplyr::select(date, volatility, type)
+
+    if (nrow(vol_df) > 0) vol_df else NULL
+  }
+
   all_volatility <- list()
-  
-  # Portfolio volatility
+
   if (!is.null(data$portfolios) && length(data$portfolios) > 0) {
     for (portfolio_name in names(data$portfolios)) {
-      portfolio_info <- data$portfolios[[portfolio_name]]
-      
-      if (!is.null(portfolio_info$cumulative_returns) && 
-          length(portfolio_info$cumulative_returns) > window) {
-        
-        cumulative_returns <- as.numeric(portfolio_info$cumulative_returns)
-        dates <- as.Date(portfolio_info$dates)
-        
-        valid_indices <- is.finite(cumulative_returns) & !is.na(dates)
-        cumulative_returns <- cumulative_returns[valid_indices]
-        dates <- dates[valid_indices]
-        
-        if (length(cumulative_returns) > window) {
-          daily_returns <- c(0, diff(log(cumulative_returns + 1)))
-          
-          volatility_data <- data.frame(
-            date = dates,
-            daily_return = daily_returns
-          ) %>%
-            filter(is.finite(daily_return)) %>%
-            arrange(date)
-          
-          if (nrow(volatility_data) >= window) {
-            volatility_data <- volatility_data %>%
-              mutate(
-                volatility = zoo::rollapply(daily_return, width = window, FUN = sd,
-                                           fill = NA, align = "right") * sqrt(252) * 100,
-                type = portfolio_name
-              ) %>%
-              filter(!is.na(volatility), is.finite(volatility)) %>%
-              select(date, volatility, type)
-            
-            if (nrow(volatility_data) > 0) {
-              all_volatility[[portfolio_name]] <- volatility_data
-            }
-          }
-        }
+      vol_df <- build_volatility(data$portfolios[[portfolio_name]], portfolio_name)
+      if (!is.null(vol_df)) {
+        all_volatility[[portfolio_name]] <- vol_df
       }
     }
   }
-  
-  return(all_volatility)
+
+  if (!is.null(data$sp500)) {
+    vol_df <- build_volatility(data$sp500, "S&P 500")
+    if (!is.null(vol_df)) {
+      all_volatility[["S&P 500"]] <- vol_df
+    }
+  }
+
+  if (!is.null(data$bitcoin)) {
+    vol_df <- build_volatility(data$bitcoin, "Bitcoin")
+    if (!is.null(vol_df)) {
+      all_volatility[["Bitcoin"]] <- vol_df
+    }
+  }
+
+  all_volatility
 }
 
 #' Calculate drawdowns
+
+#' Calculate drawdowns
 calculate_drawdowns <- function(data) {
+  build_drawdown <- function(series, name) {
+    if (is.null(series) || length(series$cumulative_returns) < 2) return(NULL)
+
+    wealth <- 1 + as.numeric(series$cumulative_returns)
+    dates <- as.Date(series$dates)
+
+    valid <- is.finite(wealth) & !is.na(dates)
+    wealth <- wealth[valid]
+    dates <- dates[valid]
+
+    if (length(wealth) < 2) return(NULL)
+
+    running_max <- cummax(wealth)
+    drawdown <- (wealth / running_max - 1) * 100
+
+    drawdown_df <- tibble::tibble(
+      date = dates,
+      drawdown = drawdown,
+      type = name
+    ) %>%
+      dplyr::filter(is.finite(drawdown))
+
+    if (nrow(drawdown_df) > 0) drawdown_df else NULL
+  }
+
   all_drawdown <- list()
-  
-  # Portfolio drawdowns
+
   if (!is.null(data$portfolios) && length(data$portfolios) > 0) {
     for (portfolio_name in names(data$portfolios)) {
-      portfolio_info <- data$portfolios[[portfolio_name]]
-      
-      if (!is.null(portfolio_info$cumulative_returns) && 
-          length(portfolio_info$cumulative_returns) > 1) {
-        
-        cumulative_returns <- as.numeric(portfolio_info$cumulative_returns) + 1  # Convert to price series
-        dates <- as.Date(portfolio_info$dates)
-        
-        valid_indices <- is.finite(cumulative_returns) & !is.na(dates)
-        cumulative_returns <- cumulative_returns[valid_indices]
-        dates <- dates[valid_indices]
-        
-        if (length(cumulative_returns) > 1) {
-          running_max <- cummax(cumulative_returns)
-          drawdown <- (cumulative_returns / running_max - 1) * 100
-          
-          drawdown_data <- data.frame(
-            date = dates,
-            drawdown = drawdown,
-            type = portfolio_name,
-            stringsAsFactors = FALSE
-          ) %>%
-            filter(is.finite(drawdown))
-          
-          if (nrow(drawdown_data) > 0) {
-            all_drawdown[[portfolio_name]] <- drawdown_data
-          }
-        }
+      dd_df <- build_drawdown(data$portfolios[[portfolio_name]], portfolio_name)
+      if (!is.null(dd_df)) {
+        all_drawdown[[portfolio_name]] <- dd_df
       }
     }
   }
-  
-  return(all_drawdown)
+
+  if (!is.null(data$sp500)) {
+    dd_df <- build_drawdown(data$sp500, "S&P 500")
+    if (!is.null(dd_df)) {
+      all_drawdown[["S&P 500"]] <- dd_df
+    }
+  }
+
+  if (!is.null(data$bitcoin)) {
+    dd_df <- build_drawdown(data$bitcoin, "Bitcoin")
+    if (!is.null(dd_df)) {
+      all_drawdown[["Bitcoin"]] <- dd_df
+    }
+  }
+
+  all_drawdown
 }
+
+#' Calculate comprehensive risk metrics
 
 #' Calculate comprehensive risk metrics
 calculate_risk_metrics <- function(data) {
   metrics_list <- list()
-  
-  # Calculate for portfolios
+
+  build_metrics <- function(series, label) {
+    if (is.null(series) || length(series$cumulative_returns) < 2) return(NULL)
+
+    period_returns <- compute_period_returns(series$cumulative_returns)
+    period_returns <- period_returns[is.finite(period_returns) & !is.na(period_returns)]
+
+    if (length(period_returns) <= 5) return(NULL)
+
+    vol_annual <- stats::sd(period_returns, na.rm = TRUE) * sqrt(252)
+    downside_returns <- period_returns[period_returns < 0]
+    downside_dev <- if (length(downside_returns) > 0) {
+      stats::sd(downside_returns, na.rm = TRUE) * sqrt(252)
+    } else {
+      0
+    }
+
+    var_95 <- stats::quantile(period_returns, 0.05, na.rm = TRUE, type = 7)
+    cvar_95 <- mean(period_returns[period_returns <= var_95], na.rm = TRUE)
+
+    cumulative_prices <- cumprod(1 + period_returns)
+    running_max <- cummax(cumulative_prices)
+    drawdown <- (cumulative_prices / running_max) - 1
+    max_dd <- min(drawdown, na.rm = TRUE)
+
+    dplyr::tibble(
+      Portfolio = label,
+      Volatility = vol_annual,
+      Downside_Deviation = downside_dev,
+      VaR_95 = var_95,
+      CVaR_95 = cvar_95,
+      Max_Drawdown = max_dd
+    )
+  }
+
   if (!is.null(data$portfolios) && length(data$portfolios) > 0) {
     for (portfolio_name in names(data$portfolios)) {
-      portfolio_info <- data$portfolios[[portfolio_name]]
-      
-      if (!is.null(portfolio_info$cumulative_returns) && 
-          length(portfolio_info$cumulative_returns) > 5) {
-        
-        cumulative_returns <- as.numeric(portfolio_info$cumulative_returns)
-        
-        # Calculate daily returns
-        daily_returns <- c(0, diff(log(cumulative_returns + 1)))
-        daily_returns <- daily_returns[is.finite(daily_returns) & !is.na(daily_returns)]
-        
-        if (length(daily_returns) > 5) {
-          # Basic metrics
-          vol_annual <- sd(daily_returns, na.rm = TRUE) * sqrt(252)
-          downside_returns <- daily_returns[daily_returns < 0]
-          downside_dev <- if(length(downside_returns) > 0) {
-            sd(downside_returns) * sqrt(252)
-          } else {
-            0
-          }
-          
-          # VaR and CVaR
-          var_95 <- quantile(daily_returns, 0.05, na.rm = TRUE)
-          cvar_95 <- mean(daily_returns[daily_returns <= var_95], na.rm = TRUE)
-          
-          # Max drawdown
-          cumulative_prices <- cumprod(1 + daily_returns)
-          running_max <- cummax(cumulative_prices)
-          drawdown <- (cumulative_prices / running_max - 1)
-          max_dd <- min(drawdown, na.rm = TRUE)
-          
-          metrics_list[[portfolio_name]] <- data.frame(
-            Portfolio = portfolio_name,
-            Volatility = vol_annual,
-            Downside_Deviation = downside_dev,
-            VaR_95 = var_95,
-            CVaR_95 = cvar_95,
-            Max_Drawdown = max_dd,
-            stringsAsFactors = FALSE
-          )
-        }
-      }
+      metrics_list[[portfolio_name]] <- build_metrics(data$portfolios[[portfolio_name]], portfolio_name)
     }
   }
-  
-  # Add benchmark metrics
-  if (!is.null(data$sp500) && !is.null(data$sp500$cumulative_returns)) {
-    cumulative_returns <- as.numeric(data$sp500$cumulative_returns)
-    daily_returns <- c(0, diff(log(cumulative_returns + 1)))
-    daily_returns <- daily_returns[is.finite(daily_returns) & !is.na(daily_returns)]
-    
-    if (length(daily_returns) > 5) {
-      vol_annual <- sd(daily_returns, na.rm = TRUE) * sqrt(252)
-      downside_returns <- daily_returns[daily_returns < 0]
-      downside_dev <- if(length(downside_returns) > 0) {
-        sd(downside_returns) * sqrt(252)
-      } else {
-        0
-      }
-      
-      var_95 <- quantile(daily_returns, 0.05, na.rm = TRUE)
-      cvar_95 <- mean(daily_returns[daily_returns <= var_95], na.rm = TRUE)
-      
-      cumulative_prices <- cumprod(1 + daily_returns)
-      running_max <- cummax(cumulative_prices)
-      drawdown <- (cumulative_prices / running_max - 1)
-      max_dd <- min(drawdown, na.rm = TRUE)
-      
-      metrics_list[["S&P 500"]] <- data.frame(
-        Portfolio = "S&P 500",
-        Volatility = vol_annual,
-        Downside_Deviation = downside_dev,
-        VaR_95 = var_95,
-        CVaR_95 = cvar_95,
-        Max_Drawdown = max_dd,
-        stringsAsFactors = FALSE
-      )
-    }
+
+  if (!is.null(data$sp500)) {
+    metrics_list[["S&P 500"]] <- build_metrics(data$sp500, "S&P 500")
   }
-  
-  if (!is.null(data$bitcoin) && !is.null(data$bitcoin$cumulative_returns)) {
-    cumulative_returns <- as.numeric(data$bitcoin$cumulative_returns)
-    daily_returns <- c(0, diff(log(cumulative_returns + 1)))
-    daily_returns <- daily_returns[is.finite(daily_returns) & !is.na(daily_returns)]
-    
-    if (length(daily_returns) > 5) {
-      vol_annual <- sd(daily_returns, na.rm = TRUE) * sqrt(252)
-      downside_returns <- daily_returns[daily_returns < 0]
-      downside_dev <- if(length(downside_returns) > 0) {
-        sd(downside_returns) * sqrt(252)
-      } else {
-        0
-      }
-      
-      var_95 <- quantile(daily_returns, 0.05, na.rm = TRUE)
-      cvar_95 <- mean(daily_returns[daily_returns <= var_95], na.rm = TRUE)
-      
-      cumulative_prices <- cumprod(1 + daily_returns)
-      running_max <- cummax(cumulative_prices)
-      drawdown <- (cumulative_prices / running_max - 1)
-      max_dd <- min(drawdown, na.rm = TRUE)
-      
-      metrics_list[["Bitcoin"]] <- data.frame(
-        Portfolio = "Bitcoin",
-        Volatility = vol_annual,
-        Downside_Deviation = downside_dev,
-        VaR_95 = var_95,
-        CVaR_95 = cvar_95,
-        Max_Drawdown = max_dd,
-        stringsAsFactors = FALSE
-      )
-    }
+
+  if (!is.null(data$bitcoin)) {
+    metrics_list[["Bitcoin"]] <- build_metrics(data$bitcoin, "Bitcoin")
   }
-  
+
+  metrics_list <- metrics_list[!vapply(metrics_list, is.null, logical(1))]
+
   if (length(metrics_list) > 0) {
-    return(bind_rows(metrics_list))
+    dplyr::bind_rows(metrics_list)
   } else {
-    return(data.frame())
+    dplyr::tibble()
   }
 }
