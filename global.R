@@ -50,6 +50,7 @@ source("utils_portfolio.R")
 source("mod_performance.R")
 source("mod_risk.R")
 source("mod_holdings.R")
+source("mod_history.R")
 
 # Helper function
 plotly_empty <- function(message = "No data available") {
@@ -60,3 +61,4 @@ plotly_empty <- function(message = "No data available") {
       annotations = list(text = message, showarrow = FALSE, font = list(size = 16))
     )
 }
+

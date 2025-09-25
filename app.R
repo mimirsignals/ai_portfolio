@@ -45,6 +45,16 @@ ui <- navbarPage(
         background-color: #fff;
         padding: 15px;
       }
+      .selection-summary {
+        margin-top: 10px;
+      }
+      .selection-summary p {
+        margin: 0 0 6px;
+      }
+      .selection-summary ul {
+        margin: 0;
+        padding-left: 18px;
+      }
     '))
   ),
   tabPanel(
@@ -58,21 +68,24 @@ ui <- navbarPage(
   tabPanel(
     title = tagList(icon("pie-chart"), "Holdings"),
     div(class = "container-fluid", holdingsUI("holdings"))
+  ),
+  tabPanel(
+    title = tagList(icon("clock-rotate-left"), "History"),
+    div(class = "container-fluid", historyUI("history"))
   )
 )
 
 server <- function(input, output, session) {
   portfolios_reactive <- reactive({
-    # Make sure you are calling the new function
     load_portfolios_from_excel("portfolio.xlsx")
   })
   
-  # Use the corrected wrapper function
   portfolio_calc <- calculate_all_portfolios_with_inheritance
   
   performance_selections <- performanceServer("performance", portfolios_reactive, portfolio_calc)
   riskServer("risk", portfolios_reactive, portfolio_calc, performance_selections)
-  holdingsServer("holdings", portfolios_reactive, portfolio_calc)
+  holdingsServer("holdings", portfolios_reactive, portfolio_calc, performance_selections)
+  historyServer("history", portfolios_reactive, portfolio_calc)
 }
 
 shinyApp(ui = ui, server = server)

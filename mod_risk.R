@@ -8,6 +8,15 @@ riskUI <- function(id) {
   tagList(
     fluidRow(
       box(
+        title = "Selection Summary",
+        status = "info",
+        solidHeader = TRUE,
+        width = 12,
+        uiOutput(ns("selection_summary"))
+      )
+    ),
+    fluidRow(
+      box(
         title = "Daily Returns Distribution",
         status = "primary",
         solidHeader = TRUE,
@@ -51,16 +60,50 @@ riskUI <- function(id) {
 riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_selections) {
   moduleServer(id, function(input, output, session) {
     
-    # Get portfolio data based on performance module selections
-    portfolio_data <- reactive({
+    selection_state <- reactive({
       req(performance_selections())
-      
-      selected_portfolios <- performance_selections()
-      
-      if (length(selected_portfolios) == 0) {
+      performance_selections()
+    })
+
+    output$selection_summary <- renderUI({
+      sel <- selection_state()
+      ids <- sel$selected_ids
+      metadata <- sel$metadata
+      group <- sel$selected_group
+
+      if (is.null(metadata) || nrow(metadata) == 0) {
+        return(tags$p("No portfolios loaded."))
+      }
+
+      if (is.null(ids) || length(ids) == 0) {
+        return(tags$p("Select at least one portfolio version in the Performance tab."))
+      }
+
+      selected_meta <- metadata %>%
+        dplyr::filter(key %in% ids) %>%
+        dplyr::arrange(dplyr::desc(start_date))
+
+      if (nrow(selected_meta) == 0) {
+        return(tags$p("Selection unavailable; choose a different version."))
+      }
+
+      tags$div(
+        class = "selection-summary",
+        tags$p(if (!is.null(group) && !identical(group, "") && !is.na(group)) sprintf("Portfolio: %s", group) else "Portfolio: (multiple)"),
+        tags$ul(lapply(seq_len(nrow(selected_meta)), function(i) {
+          tags$li(sprintf("%s", selected_meta$version_label[i]))
+        }))
+      )
+    })
+
+    portfolio_data <- reactive({
+      sel <- selection_state()
+      selected_portfolios <- sel$selected_ids
+
+      if (is.null(selected_portfolios) || length(selected_portfolios) == 0) {
         return(NULL)
       }
-      
+
       tryCatch({
         portfolio_calc(
           portfolios = portfolios_reactive(),
@@ -70,10 +113,10 @@ riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_sele
         )
       }, error = function(e) {
         warning(paste("Error in risk module portfolio calculation:", e$message))
-        return(NULL)
+        NULL
       })
     })
-    
+
     # Returns distribution plot
     output$returns_distribution <- renderPlotly({
       data <- portfolio_data()
