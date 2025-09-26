@@ -1,21 +1,16 @@
-# mod_performance.R
 
 performanceUI <- function(id) {
   ns <- NS(id)
   tagList(
     fluidRow(
       box(
-        title = "Portfolio Selection & Summary", status = "primary", solidHeader = TRUE, width = 12,
-        fluidRow(
-          column(4, selectInput(ns("portfolio_group"), "Portfolio:", choices = NULL)),
-          column(8, checkboxGroupInput(ns("selected_versions"), "Versions to compare:", choices = NULL, inline = TRUE))
-        ),
+        title = "Selection Overview", status = "primary", solidHeader = TRUE, width = 12,
         uiOutput(ns("selection_summary"))
       )
     ),
     fluidRow(
       box(
-        title = "Portfolio Performance vs BTC & S&P 500", status = "primary", solidHeader = TRUE, width = 12,
+        title = "Portfolio Performance vs Benchmarks", status = "primary", solidHeader = TRUE, width = 12,
         plotlyOutput(ns("performance_plot"), height = "500px")
       )
     ),
@@ -28,96 +23,94 @@ performanceUI <- function(id) {
   )
 }
 
-performanceServer <- function(id, portfolios_reactive, portfolio_calc) {
+performanceServer <- function(id, selection_state, portfolio_data) {
   moduleServer(id, function(input, output, session) {
 
-    portfolio_metadata <- reactive({
-      portfolios <- portfolios_reactive()
-      if (length(portfolios) == 0) {
-        return(tibble())
-      }
-
-      purrr::imap_dfr(portfolios, function(def, key) {
-        tibble(
-          key = key,
-          portfolio_name = if (!is.null(def$portfolio_name)) def$portfolio_name else key,
-          version_label = if (!is.null(def$version_label)) def$version_label else format(as.Date(def$start_date), "%Y-%m-%d"),
-          start_date = as.Date(def$start_date)
-        )
-      }) %>%
-        arrange(portfolio_name, start_date)
+    selection_metadata <- reactive({
+      sel <- selection_state()
+      meta <- sel$metadata
+      if (is.null(meta)) tibble() else meta
     })
 
-    observe({
-      meta <- portfolio_metadata()
-      choices <- unique(meta$portfolio_name)
-
-      if (length(choices) == 0) {
-        updateSelectInput(session, "portfolio_group", choices = choices, selected = character(0))
-        return()
+    output$selection_summary <- renderUI({
+      sel <- selection_state()
+      meta <- selection_metadata()
+      if (nrow(meta) == 0) {
+        return(tags$p("No portfolios loaded."))
       }
 
-      selected <- input$portfolio_group
-      if (is.null(selected) || !selected %in% choices) {
-        preferred <- choices[grepl('^high risk$', choices, ignore.case = TRUE)]
-        if (length(preferred) > 0) {
-          selected <- preferred[1]
-        } else {
-          selected <- choices[1]
-        }
-      }
+      group <- sel$selected_group
+      versions <- sel$selected_ids
 
-      updateSelectInput(session, "portfolio_group", choices = choices, selected = selected)
-    })
-
-    observeEvent(list(input$portfolio_group, portfolio_metadata()), {
-      meta <- portfolio_metadata()
-      group <- input$portfolio_group
-
-      if (is.null(group) || nrow(meta) == 0 || !group %in% meta$portfolio_name) {
-        updateCheckboxGroupInput(session, "selected_versions", choices = list(), selected = character(0))
-        return()
+      if (is.null(group) || !group %in% meta$portfolio_name) {
+        return(tags$p("Select a portfolio in the sidebar."))
       }
 
       group_meta <- meta %>%
-        filter(portfolio_name == group) %>%
-        arrange(desc(start_date))
+        dplyr::filter(portfolio_name == group) %>%
+        dplyr::arrange(dplyr::desc(start_date))
 
-      choices <- stats::setNames(group_meta$key, group_meta$version_label)
-      defaults <- input$selected_versions
-      if (is.null(defaults) || !all(defaults %in% group_meta$key)) {
-        defaults <- head(group_meta$key, n = min(2, nrow(group_meta)))
+      if (nrow(group_meta) == 0) {
+        return(tags$p("No versions available for the selected portfolio."))
       }
 
-      updateCheckboxGroupInput(session, "selected_versions", choices = choices, selected = defaults)
-    }, ignoreNULL = FALSE)
+      if (is.null(versions) || length(versions) == 0) {
+        latest <- group_meta$version_label[1]
+        return(tags$p(sprintf("Select one or more versions to compare. Latest available: %s", latest)))
+      }
 
-    selected_versions <- reactive({
-      req(input$portfolio_group)
-      req(input$selected_versions)
-      input$selected_versions
-    })
+      selected_meta <- group_meta %>%
+        dplyr::filter(key %in% versions) %>%
+        dplyr::arrange(dplyr::desc(start_date))
 
-    portfolio_data <- reactive({
-      selections <- selected_versions()
-      req(length(selections) > 0)
+      data <- tryCatch(portfolio_data(), error = function(e) NULL)
 
-      portfolio_calc(
-        portfolios = portfolios_reactive(),
-        selected_portfolios = selections,
-        show_sp500 = TRUE,
-        show_btc = TRUE
+      version_items <- lapply(seq_len(nrow(selected_meta)), function(i) {
+        key <- selected_meta$key[i]
+        label <- selected_meta$version_label[i]
+        return_pct <- NA_real_
+
+        if (!is.null(data) && !is.null(data$portfolios[[key]])) {
+          returns <- data$portfolios[[key]]$cumulative_returns
+          if (!is.null(returns) && length(returns) > 0) {
+            return_pct <- tail(returns, 1) * 100
+          }
+        }
+
+        value_text <- ifelse(
+          is.na(return_pct),
+          "Latest cumulative return unavailable",
+          sprintf("Latest cumulative return: %.2f%%", return_pct)
+        )
+        tags$li(sprintf("%s - %s", label, value_text))
+      })
+
+      tags$div(
+        class = "selection-summary",
+        tags$p(sprintf("Selected portfolio: %s", group)),
+        tags$p(sprintf("Versions selected: %d", length(versions))),
+        tags$ul(version_items)
       )
     })
 
+    active_data <- reactive({
+      tryCatch({
+        data <- portfolio_data()
+        if (is.null(data) || length(data$portfolios) == 0) NULL else data
+      }, error = function(e) NULL)
+    })
+
     output$performance_plot <- renderPlotly({
-      data <- portfolio_data()
+      data <- active_data()
       if (is.null(data)) return(plotly_empty())
 
-      meta <- portfolio_metadata()
+      sel <- selection_state()
+      meta <- selection_metadata()
+
       selected_keys <- names(data$portfolios)
-      selected_meta <- meta %>%
-        dplyr::filter(key %in% selected_keys)
+      if (length(selected_keys) == 0) return(plotly_empty())
+
+      selected_meta <- meta %>% dplyr::filter(key %in% selected_keys)
 
       portfolio_traces <- purrr::map_dfr(selected_keys, function(name) {
         series <- data$portfolios[[name]]
@@ -125,10 +118,10 @@ performanceServer <- function(id, portfolios_reactive, portfolio_calc) {
           return(tibble::tibble(date = as.Date(character()), return_pct = numeric(), portfolio = character()))
         }
         start_date <- selected_meta$start_date[selected_meta$key == name]
-        if (length(start_date) == 0 || is.na(start_date)[1]) {
-          keep_idx <- rep(TRUE, length(series$dates))
+        keep_idx <- if (length(start_date) == 0 || is.na(start_date[1])) {
+          rep(TRUE, length(series$dates))
         } else {
-          keep_idx <- series$dates >= start_date[1]
+          series$dates >= start_date[1]
         }
         tibble::tibble(
           date = series$dates[keep_idx],
@@ -159,95 +152,37 @@ performanceServer <- function(id, portfolios_reactive, portfolio_calc) {
 
       plot_df <- dplyr::bind_rows(portfolio_traces, benchmark_traces)
 
-      if (nrow(plot_df) == 0) return(plotly_empty())
-
-      plot_ly(plot_df, x = ~date, y = ~return_pct, color = ~portfolio, type = 'scatter', mode = 'lines') %>%
-        layout(title = "Performance Comparison", yaxis = list(title = "Cumulative Return (%)"), hovermode = 'x unified')
+      plotly::plot_ly(plot_df, x = ~date, y = ~return_pct, color = ~portfolio, type = "scatter", mode = "lines") %>%
+        plotly::layout(
+          xaxis = list(title = "Date"),
+          yaxis = list(title = "Cumulative Return (%)"),
+          hovermode = "x unified",
+          legend = list(orientation = "h", x = 0, y = 1.02)
+        )
     })
 
-    output$metrics_table <- renderDT({
-      data <- portfolio_data()
-      if (is.null(data)) return(data.frame(Message = "No data available"))
+    output$metrics_table <- DT::renderDataTable({
+      data <- active_data()
+      if (is.null(data)) {
+        return(DT::datatable(
+          data.frame(Message = "No data available"),
+          options = list(dom = 't'),
+          rownames = FALSE
+        ))
+      }
 
       metrics <- calculate_performance_metrics(data)
-
       if (is.null(metrics) || nrow(metrics) == 0) {
-        return(data.frame(Message = "No performance metrics available"))
+        return(DT::datatable(
+          data.frame(Message = "No metrics available"),
+          options = list(dom = 't'),
+          rownames = FALSE
+        ))
       }
 
       DT::datatable(metrics, options = list(dom = 't'), rownames = FALSE) %>%
         DT::formatPercentage(c("Total_Return", "Volatility", "Max_Drawdown"), 2) %>%
         DT::formatRound("Sharpe_Ratio", 2)
-    })
-
-    output$selection_summary <- renderUI({
-      meta <- portfolio_metadata()
-      if (nrow(meta) == 0) {
-        return(tags$p("No portfolios loaded."))
-      }
-
-      group <- input$portfolio_group
-      if (is.null(group) || !group %in% meta$portfolio_name) {
-        return(tags$p("Select a portfolio to begin."))
-      }
-
-      group_meta <- meta %>% filter(portfolio_name == group)
-      if (nrow(group_meta) == 0) {
-        return(tags$p("No versions available for the selected portfolio."))
-      }
-
-      versions <- input$selected_versions
-      if (is.null(versions) || length(versions) == 0) {
-        latest <- tail(group_meta$version_label, 1)
-        return(tags$p(sprintf("Select one or more versions to compare. Latest available: %s", latest)))
-      }
-
-      selected_meta <- group_meta %>%
-        filter(key %in% versions) %>%
-        arrange(desc(start_date))
-
-      if (nrow(selected_meta) == 0) {
-        return(tags$p("Select at least one valid version."))
-      }
-
-      data <- portfolio_data()
-
-      version_items <- lapply(seq_len(nrow(selected_meta)), function(i) {
-        key <- selected_meta$key[i]
-        label <- selected_meta$version_label[i]
-        return_pct <- NA_real_
-
-        if (!is.null(data) && !is.null(data$portfolios[[key]])) {
-          returns <- data$portfolios[[key]]$cumulative_returns
-          if (!is.null(returns) && length(returns) > 0) {
-            return_pct <- tail(returns, 1) * 100
-          }
-        }
-
-        value_text <- if (is.na(return_pct)) "Latest return unavailable" else sprintf("Latest cumulative return: %.2f%%", return_pct)
-        tags$li(sprintf("%s - %s", label, value_text))
-      })
-
-      previous_meta <- group_meta %>%
-        filter(!key %in% versions) %>%
-        arrange(desc(start_date)) %>%
-        slice_head(n = 1)
-
-      tags$div(
-        class = "selection-summary",
-        tags$p(sprintf("Selected portfolio: %s", group)),
-        tags$p(sprintf("Total versions available: %d", nrow(group_meta))),
-        tags$ul(version_items),
-        if (nrow(previous_meta) > 0) tags$p(sprintf("Previous version available: %s", previous_meta$version_label))
-      )
-    })
-
-    reactive({
-      list(
-        selected_ids = selected_versions(),
-        selected_group = input$portfolio_group,
-        metadata = portfolio_metadata()
-      )
     })
   })
 }

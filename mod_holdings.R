@@ -1,4 +1,3 @@
-# mod_holdings.R - Portfolio holdings module with version tracking
 
 holdingsUI <- function(id) {
   ns <- NS(id)
@@ -11,11 +10,8 @@ holdingsUI <- function(id) {
         status = "primary",
         solidHeader = TRUE,
         width = NULL,
-        fluidRow(
-          column(6, selectInput(ns("portfolio_group"), "Portfolio:", choices = NULL)),
-          column(6, selectInput(ns("portfolio_version"), "Version:", choices = NULL))
-        ),
         uiOutput(ns("selection_summary")),
+        uiOutput(ns("version_selector")),
         h4("Portfolio Holdings"),
         DT::dataTableOutput(ns("combined_holdings_table")),
         br(),
@@ -26,91 +22,95 @@ holdingsUI <- function(id) {
   )
 }
 
-holdingsServer <- function(id, portfolios_reactive, portfolio_calc, selection_state) {
+
+holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_data) {
   moduleServer(id, function(input, output, session) {
 
-    portfolio_metadata <- reactive({
-      portfolios <- portfolios_reactive()
-      if (length(portfolios) == 0) {
-        return(tibble())
-      }
-
-      purrr::imap_dfr(portfolios, function(def, key) {
-        tibble(
-          key = key,
-          portfolio_name = if (!is.null(def$portfolio_name)) def$portfolio_name else key,
-          version_label = if (!is.null(def$version_label)) def$version_label else format(as.Date(def$start_date), "%Y-%m-%d"),
-          start_date = as.Date(def$start_date)
+    current_selection <- reactive({
+      sel <- selection_state()
+      if (is.null(sel)) {
+        list(
+          selected_group = NULL,
+          selected_ids = character(),
+          metadata = tibble()
         )
-      }) %>%
-        arrange(portfolio_name, desc(start_date))
+      } else {
+        sel
+      }
     })
 
-    observe({
-      meta <- portfolio_metadata()
-      choices <- unique(meta$portfolio_name)
+    output$selection_summary <- renderUI({
+      sel <- current_selection()
+      meta <- sel$metadata
+      group <- sel$selected_group
 
-      if (length(choices) == 0) {
-        updateSelectInput(session, "portfolio_group", choices = choices, selected = character(0))
-        updateSelectInput(session, "portfolio_version", choices = list(), selected = character(0))
-        return()
+      if (is.null(meta) || nrow(meta) == 0) {
+        return(tags$p("No portfolios loaded."))
       }
 
-      selected <- input$portfolio_group
-      if (is.null(selected) || !selected %in% choices) {
-        preferred <- choices[grepl('^high risk$', choices, ignore.case = TRUE)]
-        if (length(preferred) > 0) {
-          selected <- preferred[1]
-        } else {
-          selected <- choices[1]
-        }
-      }
-
-      updateSelectInput(session, "portfolio_group", choices = choices, selected = selected)
-    })
-
-    observeEvent(list(input$portfolio_group, portfolio_metadata()), {
-      meta <- portfolio_metadata()
-      group <- input$portfolio_group
-
-      if (is.null(group) || nrow(meta) == 0 || !group %in% meta$portfolio_name) {
-        updateSelectInput(session, "portfolio_version", choices = list(), selected = character(0))
-        return()
+      if (is.null(group) || !group %in% meta$portfolio_name) {
+        return(tags$p("Select a portfolio in the sidebar to view holdings."))
       }
 
       group_meta <- meta %>%
-        filter(portfolio_name == group) %>%
-        arrange(desc(start_date))
+        dplyr::filter(portfolio_name == group) %>%
+        dplyr::arrange(dplyr::desc(start_date))
 
-      choices <- stats::setNames(group_meta$key, group_meta$version_label)
-      selected_version <- input$portfolio_version
-      if (is.null(selected_version) || !selected_version %in% group_meta$key) {
-        selected_version <- group_meta$key[1]
+      if (nrow(group_meta) == 0) {
+        return(tags$p("No versions available for the selected portfolio."))
       }
 
-      updateSelectInput(session, "portfolio_version", choices = choices, selected = selected_version)
-    }, ignoreNULL = FALSE)
+      versions <- sel$selected_ids
+      if (length(versions) == 0) {
+        latest <- group_meta$version_label[1]
+        return(tags$p(sprintf("Select at least one version in the sidebar. Latest available: %s", latest)))
+      }
 
-    observeEvent(selection_state(), {
-      sel <- selection_state()
-      meta <- portfolio_metadata()
-      if (nrow(meta) == 0) return()
+      tags$div(
+        class = "selection-summary",
+        tags$p(sprintf("Portfolio: %s", group)),
+        tags$p(sprintf("Versions selected: %s", paste(group_meta$version_label[group_meta$key %in% versions], collapse = ", ")))
+      )
+    })
 
+    output$version_selector <- renderUI({
+      sel <- current_selection()
+      meta <- sel$metadata
       group <- sel$selected_group
-      if (!is.null(group) && group %in% meta$portfolio_name) {
-        updateSelectInput(session, "portfolio_group", selected = group)
+
+      if (is.null(meta) || nrow(meta) == 0) {
+        return(tags$p("No versions available."))
       }
 
-      ids <- sel$selected_ids
-      if (!is.null(ids) && length(ids) > 0) {
-        selected_meta <- meta %>%
-          filter(key %in% ids) %>%
-          arrange(desc(start_date))
-        if (nrow(selected_meta) > 0) {
-          updateSelectInput(session, "portfolio_version", selected = selected_meta$key[1])
-        }
+      if (is.null(group) || !group %in% meta$portfolio_name) {
+        return(tags$p("Select a portfolio in the sidebar."))
       }
-    }, ignoreNULL = TRUE)
+
+      available_keys <- sel$selected_ids
+      if (length(available_keys) == 0) {
+        return(tags$p("Select at least one version in the sidebar."))
+      }
+
+      group_meta <- meta %>%
+        dplyr::filter(key %in% available_keys, portfolio_name == group) %>%
+        dplyr::arrange(dplyr::desc(start_date))
+
+      if (nrow(group_meta) == 0) {
+        return(tags$p("No valid versions available for holdings view."))
+      }
+
+      selected <- isolate(input$portfolio_version)
+      if (is.null(selected) || !selected %in% group_meta$key) {
+        selected <- group_meta$key[1]
+      }
+
+      selectInput(
+        session$ns("portfolio_version"),
+        label = "Version",
+        choices = stats::setNames(group_meta$key, group_meta$version_label),
+        selected = selected
+      )
+    })
 
     selected_key <- reactive({
       req(input$portfolio_version)
@@ -122,50 +122,14 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, selection_st
       portfolios[[selected_key()]]
     })
 
-    selection_summary_data <- reactive({
-      meta <- portfolio_metadata()
-      key <- selected_key()
-      if (!key %in% meta$key) {
-        return(NULL)
-      }
-      meta %>% filter(key == !!key)
-    })
-
-    output$selection_summary <- renderUI({
-      meta_row <- selection_summary_data()
-      def <- selected_definition()
-
-      if (is.null(meta_row) || nrow(meta_row) == 0 || is.null(def)) {
-        return(tags$p("Select a portfolio version to inspect."))
-      }
-
-      investment <- def$total_investment
-      investment_text <- if (is.na(investment)) "Not specified" else formatC(investment, format = "f", digits = 2, big.mark = ",")
-
-      tags$div(
-        class = "selection-summary",
-        tags$p(sprintf("Portfolio: %s", meta_row$portfolio_name[1])),
-        tags$p(sprintf("Rebalance date: %s", meta_row$version_label[1])),
-        tags$p(sprintf("Holdings: %d", length(def$symbols))),
-        tags$p(sprintf("Initial investment: %s", investment_text))
-      )
-    })
-
     selected_portfolio_data <- reactive({
+      data <- tryCatch(portfolio_data(), error = function(e) NULL)
       key <- selected_key()
-      req(key)
-
-      tryCatch({
-        portfolio_calc(
-          portfolios = portfolios_reactive(),
-          selected_portfolios = key,
-          show_sp500 = FALSE,
-          show_btc = FALSE
-        )
-      }, error = function(e) {
-        warning(paste("Holdings module calculation error:", e$message))
+      if (!is.null(data) && !is.null(data$portfolios[[key]])) {
+        data$portfolios[[key]]
+      } else {
         NULL
-      })
+      }
     })
 
     output$combined_holdings_table <- DT::renderDataTable({
@@ -177,31 +141,34 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, selection_st
         Target_Weight = paste0(round(def$weights * 100, 1), "%")
       )
 
-      portfolio_data <- selected_portfolio_data()
+      portfolio_entry <- selected_portfolio_data()
 
-      if (is.null(portfolio_data) ||
-          is.null(portfolio_data$portfolios[[selected_key()]]) ||
-          is.null(portfolio_data$portfolios[[selected_key()]]$individual_stocks)) {
+      if (is.null(portfolio_entry) ||
+          is.null(portfolio_entry$individual_stocks)) {
 
         target_weights_df$Actual_Weight <- "N/A"
 
       } else {
-        latest_values <- portfolio_data$portfolios[[selected_key()]]$individual_stocks %>%
-          filter(symbol %in% def$symbols) %>%
-          group_by(symbol) %>%
-          slice_tail(n = 1) %>%
-          ungroup() %>%
-          mutate(investment = as.numeric(investment)) %>%
-          mutate(actual_weight_pct = (investment / sum(investment)) * 100) %>%
-          select(symbol, actual_weight_pct)
+        latest_values <- portfolio_entry$individual_stocks %>%
+          dplyr::filter(symbol %in% def$symbols) %>%
+          dplyr::group_by(symbol) %>%
+          dplyr::arrange(date) %>%
+          dplyr::slice_tail(n = 1) %>%
+          dplyr::ungroup() %>%
+          dplyr::mutate(investment = as.numeric(investment)) %>%
+          dplyr::mutate(actual_weight_pct = (investment / sum(investment)) * 100) %>%
+          dplyr::select(symbol, actual_weight_pct)
 
         target_weights_df <- target_weights_df %>%
-          left_join(latest_values, by = c("Symbol" = "symbol")) %>%
-          mutate(
-            Actual_Weight = ifelse(is.na(actual_weight_pct), "N/A",
-                                   paste0(round(actual_weight_pct, 1), "%"))
+          dplyr::left_join(latest_values, by = c("Symbol" = "symbol")) %>%
+          dplyr::mutate(
+            Actual_Weight = ifelse(
+              is.na(actual_weight_pct),
+              "N/A",
+              paste0(round(actual_weight_pct, 1), "%")
+            )
           ) %>%
-          select(Symbol, Target_Weight, Actual_Weight)
+          dplyr::select(Symbol, Target_Weight, Actual_Weight)
       }
 
       DT::datatable(
@@ -214,49 +181,85 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, selection_st
 
     output$stock_performance_plot <- plotly::renderPlotly({
       def <- selected_definition()
+      portfolio_entry <- selected_portfolio_data()
       req(def)
 
+      if (is.null(portfolio_entry) || is.null(portfolio_entry$individual_stocks)) {
+        return(plotly_empty("No holdings performance data"))
+      }
+
       rebalance_date <- as.Date(def$start_date)
-      symbols <- def$symbols
+      fallback_data <- portfolio_entry$individual_stocks
 
-      stock_data <- fetch_stock_data(symbols, rebalance_date)
-
-      if (is.null(stock_data) || nrow(stock_data) == 0) {
-        return(plotly::plotly_empty())
+      start_fetch <- rebalance_date
+      if (is.na(start_fetch) && !is.null(fallback_data)) {
+        start_fetch <- suppressWarnings(min(fallback_data$date, na.rm = TRUE))
       }
 
-      stock_performance <- stock_data %>%
-        group_by(symbol) %>%
-        arrange(date) %>%
-        mutate(
-          baseline_price = first(adjusted_price),
-          cumulative_return = ((adjusted_price / baseline_price) - 1) * 100
-        ) %>%
-        ungroup() %>%
-        filter(!is.na(cumulative_return), is.finite(cumulative_return))
-
-      if (nrow(stock_performance) == 0) {
-        return(plotly::plotly_empty())
+      stock_prices <- NULL
+      if (!is.na(start_fetch)) {
+        stock_prices <- fetch_stock_data(def$symbols, start_fetch)
       }
 
-      stock_performance %>%
-        plotly::plot_ly(
-          x = ~date,
-          y = ~cumulative_return,
-          color = ~symbol,
-          type = 'scatter',
-          mode = 'lines',
-          line = list(width = 2),
-          hovertemplate = paste(
-            "<b>%{fullData.name}</b><br>",
-            "Date: %{x}<br>",
-            "Cumulative Return: %{y:.1f}%<br>",
-            "<extra></extra>"
-          )
-        ) %>%
+      if (!is.null(stock_prices) && nrow(stock_prices) > 0) {
+        stock_performance <- stock_prices %>%
+          dplyr::filter(symbol %in% def$symbols) %>%
+          dplyr::filter(is.na(rebalance_date) | date >= rebalance_date) %>%
+          dplyr::group_by(symbol) %>%
+          dplyr::arrange(date) %>%
+          dplyr::mutate(
+            adjusted_price = as.numeric(adjusted_price),
+            baseline_price = dplyr::first(adjusted_price),
+            cumulative_return = ((adjusted_price / baseline_price) - 1) * 100
+          ) %>%
+          dplyr::ungroup() %>%
+          dplyr::filter(is.finite(cumulative_return))
+      } else if (!is.null(fallback_data)) {
+        stock_performance <- fallback_data %>%
+          dplyr::filter(symbol %in% def$symbols) %>%
+          dplyr::filter(is.na(rebalance_date) | date >= rebalance_date) %>%
+          dplyr::group_by(symbol) %>%
+          dplyr::arrange(date) %>%
+          dplyr::mutate(
+            investment = as.numeric(investment),
+            baseline_value = dplyr::first(investment),
+            cumulative_return = ((investment / baseline_value) - 1) * 100
+          ) %>%
+          dplyr::ungroup() %>%
+          dplyr::filter(is.finite(cumulative_return))
+      } else {
+        stock_performance <- NULL
+      }
+
+      if (is.null(stock_performance) || nrow(stock_performance) == 0) {
+        return(plotly_empty("No holdings performance data"))
+      }
+
+      plotly::plot_ly(
+        stock_performance,
+        x = ~date,
+        y = ~cumulative_return,
+        color = ~symbol,
+        type = 'scatter',
+        mode = 'lines',
+        line = list(width = 2),
+        hovertemplate = paste(
+          "<b>%{fullData.name}</b><br>",
+          "Date: %{x}<br>",
+          "Cumulative Return: %{y:.1f}%<br>",
+          "<extra></extra>"
+        )
+      ) %>%
         plotly::layout(
           title = list(
-            text = paste("Cumulative Stock Returns Since Rebalancing on", format(rebalance_date, "%Y-%m-%d")),
+            text = if (is.na(rebalance_date)) {
+              "Cumulative Stock Returns Since Rebalancing"
+            } else {
+              paste(
+                "Cumulative Stock Returns Since Rebalancing on",
+                format(rebalance_date, "%Y-%m-%d")
+              )
+            },
             font = list(size = 16)
           ),
           xaxis = list(title = "Date", type = "date"),
@@ -275,3 +278,5 @@ holdingsServer <- function(id, portfolios_reactive, portfolio_calc, selection_st
     })
   })
 }
+
+

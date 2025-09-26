@@ -63,19 +63,28 @@ riskUI <- function(id) {
 
 #' Risk Module Server
 #' @param id Module namespace ID
-#' @param portfolios_reactive Reactive expression containing portfolio data
-#' @param portfolio_calc Portfolio calculator function
-#' @param performance_selections Reactive with selected portfolios from performance module
-riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_selections) {
+#' @param selection_state Reactive selection state shared by the app
+#' @param portfolio_data Reactive providing shared portfolio calculations
+
+riskServer <- function(id, selection_state, portfolio_data) {
   moduleServer(id, function(input, output, session) {
-    
-    selection_state <- reactive({
-      req(performance_selections())
-      performance_selections()
+    current_selection <- reactive({
+      sel <- selection_state()
+      if (is.null(sel)) {
+        list(
+          selected_ids = character(),
+          selected_group = NULL,
+          metadata = tibble(),
+          show_sp500 = TRUE,
+          show_btc = TRUE
+        )
+      } else {
+        sel
+      }
     })
 
     output$selection_summary <- renderUI({
-      sel <- selection_state()
+      sel <- current_selection()
       ids <- sel$selected_ids
       metadata <- sel$metadata
       group <- sel$selected_group
@@ -85,7 +94,7 @@ riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_sele
       }
 
       if (is.null(ids) || length(ids) == 0) {
-        return(tags$p("Select at least one portfolio version in the Performance tab."))
+        return(tags$p("Select at least one portfolio version in the sidebar."))
       }
 
       selected_meta <- metadata %>%
@@ -105,9 +114,38 @@ riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_sele
       )
     })
 
+    active_data <- reactive({
+      data <- tryCatch(portfolio_data(), error = function(e) NULL)
+      sel <- current_selection()
+      metadata <- sel$metadata
+
+      if (is.null(data)) {
+        return(NULL)
+      }
+
+      if (is.null(metadata) || nrow(metadata) == 0) {
+        return(data)
+      }
+
+      tryCatch(trim_portfolio_results(data, metadata), error = function(e) data)
+    })
+
+    risk_metrics <- reactive({
+      data <- active_data()
+      if (is.null(data)) return(data.frame())
+
+      tryCatch({
+        metrics <- calculate_risk_metrics(data)
+        if (is.null(metrics) || nrow(metrics) == 0) data.frame() else metrics
+      }, error = function(e) {
+        warning(paste("Risk metrics calculation error:", e$message))
+        data.frame()
+      })
+    })
+
     output$risk_alerts <- renderUI({
       metrics <- risk_metrics()
-      sel <- selection_state()
+      sel <- current_selection()
       focus <- sel$selected_ids
 
       if (is.null(metrics) || nrow(metrics) == 0) {
@@ -150,59 +188,22 @@ riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_sele
       }
     })
 
-    portfolio_data <- reactive({
-      sel <- selection_state()
-      selected_portfolios <- sel$selected_ids
-      metadata <- sel$metadata
-
-      if (is.null(selected_portfolios) || length(selected_portfolios) == 0) {
-        return(NULL)
-      }
-
-      tryCatch({
-        result <- portfolio_calc(
-          portfolios = portfolios_reactive(),
-          selected_portfolios = selected_portfolios,
-          show_sp500 = TRUE,
-          show_btc = TRUE
-        )
-        trim_portfolio_results(result, metadata)
-      }, error = function(e) {
-        warning(paste("Error in risk module portfolio calculation:", e$message))
-        NULL
-      })
-    })
-
-    risk_metrics <- reactive({
-      data <- portfolio_data()
-      if (is.null(data)) return(data.frame())
-
-      tryCatch({
-        metrics <- calculate_risk_metrics(data)
-        if (is.null(metrics) || nrow(metrics) == 0) data.frame() else metrics
-      }, error = function(e) {
-        warning(paste("Risk metrics calculation error:", e$message))
-        data.frame()
-      })
-    })
-
-    # Returns distribution plot
     output$returns_distribution <- renderPlotly({
-      data <- portfolio_data()
+      data <- active_data()
       if (is.null(data)) return(plotly_empty("No data available"))
-      
+
       tryCatch({
         all_returns <- calculate_all_returns(data)
-        
-        if (length(all_returns) == 0 || nrow(bind_rows(all_returns)) == 0) {
+
+        if (length(all_returns) == 0 || nrow(dplyr::bind_rows(all_returns)) == 0) {
           return(plotly_empty("No returns data available"))
         }
-        
-        combined_returns <- bind_rows(all_returns)
-        
-        plot_ly(combined_returns, x = ~daily_return, color = ~type, type = "histogram",
-                alpha = 0.7, histnorm = "probability density") %>%
-          layout(
+
+        combined_returns <- dplyr::bind_rows(all_returns)
+
+        plotly::plot_ly(combined_returns, x = ~daily_return, color = ~type, type = "histogram",
+          alpha = 0.7, histnorm = "probability density") %>%
+          plotly::layout(
             title = "Daily Returns Distribution",
             xaxis = list(title = "Daily Return (%)"),
             yaxis = list(title = "Density"),
@@ -212,76 +213,75 @@ riskServer <- function(id, portfolios_reactive, portfolio_calc, performance_sele
         plotly_empty(paste("Returns distribution error:", e$message))
       })
     })
-    
-    # Rolling volatility plot
+
     output$volatility_plot <- renderPlotly({
-      data <- portfolio_data()
+      data <- active_data()
       if (is.null(data)) return(plotly_empty("No data available"))
-      
+
       tryCatch({
         all_volatility <- calculate_volatility(data)
-        
-        if (length(all_volatility) == 0 || nrow(bind_rows(all_volatility)) == 0) {
+
+        if (length(all_volatility) == 0 || nrow(dplyr::bind_rows(all_volatility)) == 0) {
           return(plotly_empty("No volatility data available"))
         }
-        
-        combined_volatility <- bind_rows(all_volatility)
-        
-        plot_ly(combined_volatility, x = ~date, y = ~volatility, color = ~type,
-                type = 'scatter', mode = 'lines') %>%
-          layout(
-            title = "30-Day Rolling Volatility",
+
+        combined_volatility <- dplyr::bind_rows(all_volatility)
+
+        plotly::plot_ly(combined_volatility, x = ~date, y = ~volatility, color = ~type,
+          type = "scatter", mode = "lines") %>%
+          plotly::layout(
+            title = "Rolling Volatility (30 days)",
             xaxis = list(title = "Date"),
-            yaxis = list(title = "Volatility (%)")
+            yaxis = list(title = "Annualised Volatility"),
+            hovermode = "x unified"
           )
       }, error = function(e) {
         plotly_empty(paste("Volatility plot error:", e$message))
       })
     })
-    
-    # Drawdown analysis plot
+
     output$drawdown_plot <- renderPlotly({
-      data <- portfolio_data()
+      data <- active_data()
       if (is.null(data)) return(plotly_empty("No data available"))
-      
+
       tryCatch({
-        all_drawdowns <- calculate_drawdowns(data)
-        
-        if (length(all_drawdowns) == 0 || nrow(bind_rows(all_drawdowns)) == 0) {
+        drawdowns <- calculate_drawdowns(data)
+
+        if (length(drawdowns) == 0 || nrow(dplyr::bind_rows(drawdowns)) == 0) {
           return(plotly_empty("No drawdown data available"))
         }
-        
-        combined_drawdowns <- bind_rows(all_drawdowns)
-        
-        plot_ly(combined_drawdowns, x = ~date, y = ~drawdown, color = ~type,
-                type = 'scatter', mode = 'lines', fill = 'tozeroy') %>%
-          layout(
-            title = "Portfolio Drawdown Analysis",
+
+        combined_drawdowns <- dplyr::bind_rows(drawdowns)
+
+        plotly::plot_ly(combined_drawdowns, x = ~date, y = ~drawdown, color = ~type,
+          type = "scatter", mode = "lines") %>%
+          plotly::layout(
+            title = "Drawdown Analysis",
             xaxis = list(title = "Date"),
-            yaxis = list(title = "Drawdown (%)")
+            yaxis = list(title = "Drawdown (%)"),
+            hovermode = "x unified"
           )
       }, error = function(e) {
         plotly_empty(paste("Drawdown plot error:", e$message))
       })
     })
-    
-    # Risk metrics summary table
-    output$risk_metrics_table <- renderDT({
-      metrics <- risk_metrics()
 
+    output$risk_metrics_table <- DT::renderDataTable({
+      metrics <- risk_metrics()
       if (is.null(metrics) || nrow(metrics) == 0) {
-        return(data.frame(Message = "No risk metrics available"))
+        return(DT::datatable(
+          data.frame(Message = "No metrics available"),
+          options = list(dom = 't'),
+          rownames = FALSE
+        ))
       }
 
-      DT::datatable(
-        metrics,
-        options = list(dom = 't', pageLength = 20),
-        rownames = FALSE
-      ) %>%
-        DT::formatPercentage(columns = c("Volatility", "Downside_Deviation", "VaR_95", "CVaR_95", "Max_Drawdown"), digits = 2)
+      DT::datatable(metrics, options = list(pageLength = 25, dom = 't'), rownames = FALSE) %>%
+        DT::formatPercentage(c("Volatility", "Downside_Deviation", "VaR_95", "CVaR_95", "Max_Drawdown"), 2)
     })
   })
 }
+
 
 # Helper functions for risk calculations
 
