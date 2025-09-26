@@ -1,5 +1,12 @@
 # global.R
 
+options(shiny.fullstacktrace = TRUE)
+options(shiny.error = function(e) { 
+  print(e); 
+  cat(">>> SHINY STARTUP ERROR <<<\n"); 
+  traceback(3); 
+})
+
 library(shiny)
 library(tidyverse)
 library(quantmod)
