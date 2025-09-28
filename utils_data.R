@@ -239,120 +239,78 @@ run_portfolio_calculations <- function(symbols, weights, start_date, total_inves
 #' @param start_date Start date for data
 #' @return Data frame with stock data
 
-fetch_stock_data <- function(symbols, start_date, force_refresh = FALSE) {
+fetch_stock_data <- function(symbols, start_date) {
+
+  # Ensure we have valid symbols
   symbols <- unique(symbols[!is.na(symbols) & symbols != ""])
+
   if (length(symbols) == 0) {
     warning("No valid symbols provided to fetch_stock_data")
     return(NULL)
   }
 
-  start_date <- as.Date(start_date)
-  if (is.na(start_date)) {
-    warning("Invalid start date provided to fetch_stock_data")
-    return(NULL)
+  # Set reasonable end date (today + 1 to include today's data)
+  end_date <- Sys.Date() + 1
+
+  # Ensure start_date is reasonable
+  if (start_date > end_date) {
+    start_date <- end_date - 365  # Default to 1 year back
   }
 
-  end_date <- Sys.Date() + 1
-  collected <- vector("list", length(symbols))
-  keep <- 0
+  all_stock_data <- data.frame()
 
   for (symbol in symbols) {
-    symbol <- as.character(symbol)
-    cached <- get0(symbol, envir = .stock_data_cache, inherits = FALSE)
-
-    cached_min <- if (!is.null(cached)) cached$min_date else NA
-    cached_max <- if (!is.null(cached)) cached$max_date else NA
-
-    needs_refresh <- force_refresh || is.null(cached) ||
-      is.na(cached_min) || start_date < cached_min ||
-      is.na(cached_max) || cached_max < (Sys.Date() - 1)
-
-    fetch_from <- start_date
-    if (!is.na(cached_min)) {
-      fetch_from <- min(fetch_from, cached_min, na.rm = TRUE)
-    }
-
-    stock_df <- NULL
-
-    if (needs_refresh) {
-      stock_xts <- tryCatch(
-        getSymbols(
-          symbol,
-          from = fetch_from,
-          to = end_date,
-          auto.assign = FALSE,
-          warnings = FALSE
-        ),
-        error = function(e) {
-          warning(paste("Failed to fetch data for", symbol, ":", e$message))
-          NULL
-        }
-      )
+    tryCatch({
+      # Fetch data using quantmod
+      stock_xts <- getSymbols(symbol, 
+                             from = start_date, 
+                             to = end_date, 
+                             auto.assign = FALSE,
+                             warnings = FALSE)
 
       if (!is.null(stock_xts) && nrow(stock_xts) > 0) {
+        # Convert to data frame with proper data types
         stock_df <- data.frame(
           date = as.Date(index(stock_xts)),
-          symbol = rep(symbol, nrow(stock_xts)),
+          symbol = as.character(symbol),
           adjusted_price = as.numeric(Ad(stock_xts)),
           stringsAsFactors = FALSE
-        ) %>%
+        )
+
+        # Filter out invalid prices and ensure data types
+        stock_df <- stock_df %>%
           mutate(
             date = as.Date(date),
             symbol = as.character(symbol),
             adjusted_price = as.numeric(adjusted_price)
           ) %>%
           filter(
-            !is.na(date),
-            !is.na(symbol),
-            symbol != "",
-            !is.na(adjusted_price),
-            is.finite(adjusted_price),
-            adjusted_price > 0
-          ) %>%
-          arrange(date)
-
-        if (!is.null(stock_df) && nrow(stock_df) > 0) {
-          assign(
-            symbol,
-            list(
-              data = stock_df,
-              min_date = min(stock_df$date),
-              max_date = max(stock_df$date),
-              last_fetch = Sys.time()
-            ),
-            envir = .stock_data_cache
+            !is.na(adjusted_price), 
+            is.finite(adjusted_price), 
+            adjusted_price > 0, 
+            !is.na(date)
           )
-        } else if (!is.null(cached)) {
-          stock_df <- cached$data
+
+        if (nrow(stock_df) > 0) {
+          all_stock_data <- rbind(all_stock_data, stock_df)
         }
-      } else if (!is.null(cached)) {
-        stock_df <- cached$data
       }
-    } else if (!is.null(cached)) {
-      stock_df <- cached$data
-    }
+    }, error = function(e) {
+      warning(paste("Failed to fetch data for", symbol, ":", e$message))
+    })
 
-    if (is.null(stock_df) || nrow(stock_df) == 0) {
-      next
-    }
-
-    symbol_data <- stock_df %>%
-      filter(date >= start_date)
-
-    if (nrow(symbol_data) == 0) {
-      next
-    }
-
-    keep <- keep + 1
-    collected[[keep]] <- symbol_data
+    # Small delay to be nice to data providers
+    Sys.sleep(0.1)
+    Sys.sleep(0.01)
   }
 
-  if (keep == 0) {
+  if (nrow(all_stock_data) == 0) {
     warning("No valid stock data retrieved")
     return(NULL)
   }
 
-  all_stock_data <- dplyr::bind_rows(collected[seq_len(keep)]) %>%
+  # Final data type validation
+  all_stock_data <- all_stock_data %>%
     mutate(
       date = as.Date(date),
       symbol = as.character(symbol),
@@ -365,13 +323,7 @@ fetch_stock_data <- function(symbols, start_date, force_refresh = FALSE) {
       !is.na(adjusted_price),
       is.finite(adjusted_price),
       adjusted_price > 0
-    ) %>%
-    arrange(symbol, date)
+    )
 
-  if (nrow(all_stock_data) == 0) {
-    warning("No valid stock data retrieved")
-    return(NULL)
-  }
-
-  all_stock_data
+  return(all_stock_data)
 }
