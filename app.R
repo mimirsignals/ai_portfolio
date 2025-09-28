@@ -1,4 +1,4 @@
-﻿# app.R
+# app.R
 
 source("global.R")
 
