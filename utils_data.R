@@ -248,7 +248,7 @@ fetch_stock_data <- function(symbols, start_date) {
   }
 
   start_date <- suppressWarnings(as.Date(start_date, origin = "1970-01-01"))
-  end_date <- Sys.Date()
+  end_date <- Sys.Date() + 1  # Add 1 day to include current date data
 
   if (is.na(start_date)) {
     start_date <- end_date - 365

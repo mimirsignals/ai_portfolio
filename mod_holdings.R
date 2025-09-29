@@ -16,7 +16,10 @@ holdingsUI <- function(id) {
         DT::dataTableOutput(ns("combined_holdings_table")),
         br(),
         h4("Stock Performance Since Rebalancing"),
-        plotly::plotlyOutput(ns("stock_performance_plot"), height = "400px")
+        plotly::plotlyOutput(ns("stock_performance_plot"), height = "400px"),
+        br(),
+        h4("Rebalance Transactions"),
+        DT::dataTableOutput(ns("transaction_table"))
       )
     )
   )
@@ -132,6 +135,18 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
       }
     })
 
+    selected_transactions <- reactive({
+      data <- tryCatch(portfolio_data(), error = function(e) NULL)
+      key <- selected_key()
+
+      if (is.null(data) || is.null(data$transactions)) {
+        return(tibble::tibble())
+      }
+
+      tx <- data$transactions[[key]]
+      if (is.null(tx)) tibble::tibble() else tx
+    })
+
     output$combined_holdings_table <- DT::renderDataTable({
       def <- selected_definition()
       req(def)
@@ -177,6 +192,32 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
         rownames = FALSE,
         colnames = c('Symbol', 'Target Weight', 'Actual Weight')
       )
+    })
+
+    output$transaction_table <- DT::renderDataTable({
+      tx <- selected_transactions()
+
+      if (nrow(tx) == 0) {
+        return(DT::datatable(
+          data.frame(Message = "No transactions for this version"),
+          options = list(dom = 't'),
+          rownames = FALSE
+        ))
+      }
+
+      display <- tx %>%
+        dplyr::mutate(
+          rebalance_date = as.character(rebalance_date),
+          price_date = as.character(price_date)
+        )
+
+      DT::datatable(
+        display,
+        options = list(pageLength = 15, order = list(list(0, 'desc'))),
+        rownames = FALSE
+      ) %>%
+        DT::formatRound(c('trade_value', 'shares_change', 'price', 'previous_value', 'target_value'), 4) %>%
+        DT::formatPercentage(c('previous_weight', 'target_weight'), 1)
     })
 
     output$stock_performance_plot <- plotly::renderPlotly({
@@ -278,5 +319,6 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
     })
   })
 }
+
 
 
