@@ -241,89 +241,141 @@ run_portfolio_calculations <- function(symbols, weights, start_date, total_inves
 
 fetch_stock_data <- function(symbols, start_date) {
 
-  # Ensure we have valid symbols
   symbols <- unique(symbols[!is.na(symbols) & symbols != ""])
-
   if (length(symbols) == 0) {
     warning("No valid symbols provided to fetch_stock_data")
     return(NULL)
   }
 
-  # Set reasonable end date (today + 1 to include today's data)
-  end_date <- Sys.Date() + 1
+  start_date <- suppressWarnings(as.Date(start_date, origin = "1970-01-01"))
+  end_date <- Sys.Date()
 
-  # Ensure start_date is reasonable
+  if (is.na(start_date)) {
+    start_date <- end_date - 365
+  }
+
   if (start_date > end_date) {
-    start_date <- end_date - 365  # Default to 1 year back
+    start_date <- end_date - 365
   }
 
-  all_stock_data <- data.frame()
+  if (as.numeric(end_date - start_date) < 5) {
+    start_date <- end_date - 5
+  }
 
-  for (symbol in symbols) {
+  start_date <- as.Date(start_date)
+  end_date <- as.Date(end_date)
+
+  fetch_quantmod <- function(symbol) {
     tryCatch({
-      # Fetch data using quantmod
-      stock_xts <- getSymbols(symbol, 
-                             from = start_date, 
-                             to = end_date, 
-                             auto.assign = FALSE,
-                             warnings = FALSE)
-
-      if (!is.null(stock_xts) && nrow(stock_xts) > 0) {
-        # Convert to data frame with proper data types
-        stock_df <- data.frame(
-          date = as.Date(index(stock_xts)),
-          symbol = as.character(symbol),
-          adjusted_price = as.numeric(Ad(stock_xts)),
-          stringsAsFactors = FALSE
+      xts_data <- suppressWarnings(suppressMessages(
+        quantmod::getSymbols(
+          symbol,
+          from = start_date,
+          to = end_date,
+          auto.assign = FALSE
         )
+      ))
 
-        # Filter out invalid prices and ensure data types
-        stock_df <- stock_df %>%
-          mutate(
-            date = as.Date(date),
-            symbol = as.character(symbol),
-            adjusted_price = as.numeric(adjusted_price)
-          ) %>%
-          filter(
-            !is.na(adjusted_price), 
-            is.finite(adjusted_price), 
-            adjusted_price > 0, 
-            !is.na(date)
-          )
-
-        if (nrow(stock_df) > 0) {
-          all_stock_data <- rbind(all_stock_data, stock_df)
-        }
+      if (is.null(xts_data) || nrow(xts_data) == 0) {
+        return(NULL)
       }
-    }, error = function(e) {
-      warning(paste("Failed to fetch data for", symbol, ":", e$message))
-    })
 
-    # Small delay to be nice to data providers
-    Sys.sleep(0.1)
-    Sys.sleep(0.01)
+      stock_df <- data.frame(
+        date = as.Date(index(xts_data)),
+        symbol = as.character(symbol),
+        adjusted_price = as.numeric(quantmod::Ad(xts_data)),
+        stringsAsFactors = FALSE
+      )
+
+      stock_df[is.finite(stock_df$adjusted_price) & stock_df$adjusted_price > 0 & !is.na(stock_df$date), , drop = FALSE]
+    }, error = function(e) {
+      NULL
+    })
   }
 
-  if (nrow(all_stock_data) == 0) {
+  fetch_yahoo_csv <- function(symbol) {
+    period1 <- as.integer(as.POSIXct(start_date, tz = "UTC"))
+    period2 <- as.integer(as.POSIXct(end_date + 1, tz = "UTC"))
+    yahoo_url <- sprintf(
+      "https://query1.finance.yahoo.com/v7/finance/download/%s?period1=%d&period2=%d&interval=1d&events=history&includeAdjustedClose=true",
+      utils::URLencode(symbol, reserved = TRUE),
+      period1,
+      period2
+    )
+
+    csv_df <- tryCatch(
+      utils::read.csv(yahoo_url, stringsAsFactors = FALSE),
+      error = function(e) NULL,
+      warning = function(w) NULL
+    )
+
+    if (is.null(csv_df) || !("Adj.Close" %in% names(csv_df))) {
+      return(NULL)
+    }
+
+    csv_df <- csv_df[!is.na(csv_df$Adj.Close) & csv_df$Adj.Close > 0 & !is.na(csv_df$Date), , drop = FALSE]
+    if (nrow(csv_df) == 0) {
+      return(NULL)
+    }
+
+    data.frame(
+      date = as.Date(csv_df$Date),
+      symbol = as.character(symbol),
+      adjusted_price = as.numeric(csv_df$Adj.Close),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  get_symbol_data <- function(symbol) {
+    cache_key <- paste(symbol, start_date, end_date, sep = "|")
+    if (exists(cache_key, envir = .stock_data_cache, inherits = FALSE)) {
+      return(get(cache_key, envir = .stock_data_cache, inherits = FALSE))
+    }
+
+    stock_df <- fetch_quantmod(symbol)
+    if (is.null(stock_df) || nrow(stock_df) == 0) {
+      stock_df <- fetch_yahoo_csv(symbol)
+    }
+
+    if (!is.null(stock_df) && nrow(stock_df) > 0) {
+      assign(cache_key, stock_df, envir = .stock_data_cache)
+      return(stock_df)
+    }
+
+    NULL
+  }
+
+  stock_data_list <- lapply(symbols, get_symbol_data)
+  valid_entries <- vapply(stock_data_list, function(x) !is.null(x) && nrow(x) > 0, logical(1))
+
+  if (!any(valid_entries)) {
     warning("No valid stock data retrieved")
     return(NULL)
   }
 
-  # Final data type validation
-  all_stock_data <- all_stock_data %>%
-    mutate(
+  all_stock_data <- dplyr::bind_rows(stock_data_list[valid_entries]) %>%
+    dplyr::mutate(
       date = as.Date(date),
       symbol = as.character(symbol),
       adjusted_price = as.numeric(adjusted_price)
     ) %>%
-    filter(
+    dplyr::filter(
       !is.na(date),
       !is.na(symbol),
       symbol != "",
       !is.na(adjusted_price),
       is.finite(adjusted_price),
-      adjusted_price > 0
-    )
+      adjusted_price > 0,
+      date >= start_date,
+      date <= end_date
+    ) %>%
+    dplyr::arrange(date, symbol) %>%
+    dplyr::distinct(date, symbol, .keep_all = TRUE)
+
+  if (nrow(all_stock_data) == 0) {
+    warning("No valid stock data retrieved")
+    return(NULL)
+  }
 
   return(all_stock_data)
 }
