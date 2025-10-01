@@ -137,17 +137,36 @@ performanceServer <- function(id, selection_state, portfolio_data) {
         earliest_start <- min(portfolio_traces$date, na.rm = TRUE)
       }
 
+      # Helper function to recalculate benchmark returns from earliest_start
+      recalc_benchmark <- function(benchmark_data, name) {
+        if (is.null(benchmark_data)) return(NULL)
+
+        keep_idx <- benchmark_data$dates >= earliest_start
+        if (!any(keep_idx)) return(NULL)
+
+        filtered_dates <- benchmark_data$dates[keep_idx]
+        filtered_returns <- benchmark_data$cumulative_returns[keep_idx]
+
+        # Recalculate returns to start at 0% from earliest_start
+        # Convert cumulative returns back to prices, then recalculate from first filtered date
+        if (length(filtered_returns) > 0) {
+          prices <- 1 + filtered_returns
+          baseline_price <- prices[1]
+          recalc_returns <- (prices / baseline_price) - 1
+
+          tibble::tibble(
+            date = filtered_dates,
+            return_pct = as.numeric(recalc_returns) * 100,
+            portfolio = name
+          )
+        } else {
+          NULL
+        }
+      }
+
       benchmark_traces <- dplyr::bind_rows(
-        if (!is.null(data$sp500)) tibble::tibble(
-          date = data$sp500$dates[data$sp500$dates >= earliest_start],
-          return_pct = as.numeric(data$sp500$cumulative_returns[data$sp500$dates >= earliest_start]) * 100,
-          portfolio = "S&P 500"
-        ),
-        if (!is.null(data$bitcoin)) tibble::tibble(
-          date = data$bitcoin$dates[data$bitcoin$dates >= earliest_start],
-          return_pct = as.numeric(data$bitcoin$cumulative_returns[data$bitcoin$dates >= earliest_start]) * 100,
-          portfolio = "Bitcoin"
-        )
+        recalc_benchmark(data$sp500, "S&P 500"),
+        recalc_benchmark(data$bitcoin, "Bitcoin")
       )
 
       plot_df <- dplyr::bind_rows(portfolio_traces, benchmark_traces)

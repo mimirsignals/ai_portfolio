@@ -23,53 +23,57 @@ clear_stock_data_cache <- function(symbols = NULL) {
 #' @param total_investment Total investment amount
 #' @return List with portfolio and individual stock performance
 calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_investment) {
-  
+
   if (is.null(stock_data) || nrow(stock_data) == 0) {
     return(NULL)
   }
-  
+
   tryCatch({
     # Ensure all inputs are properly typed
     weights <- as.numeric(weights)
     total_investment <- as.numeric(total_investment)
     symbols <- as.character(symbols)
-    
+
     # Validate inputs
     if (any(is.na(weights)) || any(is.na(symbols)) || is.na(total_investment)) {
       warning("Invalid input data (NA values found)")
       return(NULL)
     }
-    
+
     if (total_investment <= 0) {
       warning("Total investment must be positive")
       return(NULL)
     }
-    
+
     # Calculate individual stock investments
     symbol_investments <- total_investment * weights
     names(symbol_investments) <- symbols
-    
+
+    # Get the earliest date from the stock_data to use as the baseline
+    earliest_date <- min(stock_data$date, na.rm = TRUE)
+
     # Calculate individual stock performance
     individual_stocks <- data.frame()
-    
+
     for (i in seq_along(symbols)) {
       current_symbol <- symbols[i]
       investment <- symbol_investments[current_symbol]
-      
+
       # FIX: Corrected the filter condition
       symbol_data <- stock_data %>%
-        filter(symbol == current_symbol) %>% 
+        filter(symbol == current_symbol) %>%
         arrange(date)
-      
+
       if (nrow(symbol_data) > 0) {
         # Calculate performance based on price changes
         initial_price <- symbol_data$adjusted_price[1]
-        
+        first_date <- symbol_data$date[1]
+
         if (is.na(initial_price) || initial_price <= 0) {
           warning(paste("Invalid initial price for symbol:", current_symbol))
           next
         }
-        
+
         symbol_performance <- symbol_data %>%
           mutate(
             # Ensure all calculations use numeric values
@@ -83,7 +87,20 @@ calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_inv
           select(date, symbol, investment, daily_return) %>%
           # Filter out any invalid values
           filter(is.finite(investment), is.finite(daily_return))
-        
+
+        # If the first trading date for this symbol is after the earliest date,
+        # prepend a row at the earliest date with the initial investment value
+        if (first_date > earliest_date) {
+          initial_row <- data.frame(
+            date = earliest_date,
+            symbol = current_symbol,
+            investment = investment,
+            daily_return = 0,
+            stringsAsFactors = FALSE
+          )
+          symbol_performance <- rbind(initial_row, symbol_performance)
+        }
+
         individual_stocks <- rbind(individual_stocks, symbol_performance)
       }
     }
@@ -120,8 +137,9 @@ calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_inv
         },
         .groups = 'drop'
       ) %>%
-      arrange(date)
-    
+      arrange(date) %>%
+      ungroup()
+
     # Ensure we have valid portfolio data
     portfolio_tbl <- portfolio_tbl %>%
       mutate(
@@ -129,6 +147,14 @@ calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_inv
         daily_return = as.numeric(daily_return)
       ) %>%
       filter(!is.na(investment), is.finite(investment), investment > 0)
+
+    # CRITICAL FIX: Ensure the first row matches the exact total_investment
+    # This ensures cumulative returns always start at exactly 0%
+    # Must be done AFTER type conversion and filtering to ensure it persists
+    if (nrow(portfolio_tbl) > 0) {
+      portfolio_tbl[1, "investment"] <- as.numeric(total_investment)
+      portfolio_tbl[1, "daily_return"] <- 0
+    }
     
     if (nrow(portfolio_tbl) == 0) {
       warning("No valid portfolio data after filtering")
