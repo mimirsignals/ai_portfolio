@@ -11,6 +11,7 @@ holdingsUI <- function(id) {
         solidHeader = TRUE,
         width = NULL,
         uiOutput(ns("selection_summary")),
+        uiOutput(ns("group_selector")),
         uiOutput(ns("version_selector")),
         h4("Portfolio Holdings"),
         DT::dataTableOutput(ns("combined_holdings_table")),
@@ -34,25 +35,66 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
       if (is.null(sel)) {
         list(
           selected_group = NULL,
+          selected_groups = character(),
           selected_ids = character(),
-          metadata = tibble()
+          metadata = tibble(),
+          date_range = NULL
         )
       } else {
         sel
       }
     })
 
+    available_groups <- reactive({
+      sel <- current_selection()
+      groups <- sel$selected_groups
+      meta <- sel$metadata
+      if ((is.null(groups) || length(groups) == 0) && !is.null(meta) && nrow(meta) > 0) {
+        groups <- unique(meta$portfolio_name)
+      }
+      unique(groups)
+    })
+
+    output$group_selector <- renderUI({
+      groups <- available_groups()
+      if (length(groups) <= 1) {
+        return(NULL)
+      }
+      selected <- isolate(input$holdings_group)
+      if (is.null(selected) || !selected %in% groups) {
+        selected <- groups[1]
+      }
+      selectInput(
+        session$ns("holdings_group"),
+        label = "Focus portfolio",
+        choices = stats::setNames(groups, groups),
+        selected = selected
+      )
+    })
+
+    active_group <- reactive({
+      groups <- available_groups()
+      selected <- input$holdings_group
+      if (!is.null(selected) && selected %in% groups) {
+        selected
+      } else if (length(groups) > 0) {
+        groups[1]
+      } else {
+        NULL
+      }
+    })
+
     output$selection_summary <- renderUI({
       sel <- current_selection()
       meta <- sel$metadata
-      group <- sel$selected_group
+      group <- active_group()
 
       if (is.null(meta) || nrow(meta) == 0) {
         return(tags$p("No portfolios loaded."))
       }
 
       if (is.null(group) || !group %in% meta$portfolio_name) {
-        return(tags$p("Select a portfolio in the sidebar to view holdings."))
+        return(tags$p("Select a portfolio to inspect holdings."))
       }
 
       group_meta <- meta %>%
@@ -63,54 +105,53 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
         return(tags$p("No versions available for the selected portfolio."))
       }
 
-      versions <- sel$selected_ids
-      if (length(versions) == 0) {
+      selected_versions <- intersect(sel$selected_ids, group_meta$key)
+      if (length(selected_versions) == 0) {
         latest <- group_meta$version_label[1]
-        return(tags$p(sprintf("Select at least one version in the sidebar. Latest available: %s", latest)))
+        return(tags$p(sprintf("Add %s to the comparison to view holdings (latest: %s).", group, latest)))
       }
 
       tags$div(
         class = "selection-summary",
         tags$p(sprintf("Portfolio: %s", group)),
-        tags$p(sprintf("Versions selected: %s", paste(group_meta$version_label[group_meta$key %in% versions], collapse = ", ")))
+        tags$p(sprintf("Versions available in view: %s", paste(group_meta$version_label[group_meta$key %in% selected_versions], collapse = ", ")))
       )
     })
 
     output$version_selector <- renderUI({
       sel <- current_selection()
       meta <- sel$metadata
-      group <- sel$selected_group
+      group <- active_group()
 
       if (is.null(meta) || nrow(meta) == 0) {
         return(tags$p("No versions available."))
       }
 
       if (is.null(group) || !group %in% meta$portfolio_name) {
-        return(tags$p("Select a portfolio in the sidebar."))
-      }
-
-      available_keys <- sel$selected_ids
-      if (length(available_keys) == 0) {
-        return(tags$p("Select at least one version in the sidebar."))
+        return(tags$p("Select a portfolio to inspect holdings."))
       }
 
       group_meta <- meta %>%
-        dplyr::filter(key %in% available_keys, portfolio_name == group) %>%
+        dplyr::filter(portfolio_name == group) %>%
         dplyr::arrange(dplyr::desc(start_date))
 
-      if (nrow(group_meta) == 0) {
-        return(tags$p("No valid versions available for holdings view."))
+      available_keys <- intersect(sel$selected_ids, group_meta$key)
+      if (length(available_keys) == 0) {
+        latest <- group_meta$version_label[1]
+        return(tags$p(sprintf("Add %s to the comparison to inspect holdings (latest: %s).", group, latest)))
       }
 
+      options_df <- group_meta %>% dplyr::filter(key %in% available_keys)
+
       selected <- isolate(input$portfolio_version)
-      if (is.null(selected) || !selected %in% group_meta$key) {
-        selected <- group_meta$key[1]
+      if (is.null(selected) || !selected %in% options_df$key) {
+        selected <- options_df$key[1]
       }
 
       selectInput(
         session$ns("portfolio_version"),
         label = "Version",
-        choices = stats::setNames(group_meta$key, group_meta$version_label),
+        choices = stats::setNames(options_df$key, options_df$version_label),
         selected = selected
       )
     })
@@ -319,6 +360,9 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
     })
   })
 }
+
+
+
 
 
 

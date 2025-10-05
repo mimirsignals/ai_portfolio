@@ -15,7 +15,7 @@ ui <- fluidPage(
         min-height: 100vh;
       }
       .app-sidebar {
-        width: 280px;
+        width: 300px;
         background-color: #f8f9fb;
         border-right: 1px solid #dee2e6;
         padding: 24px 20px;
@@ -42,9 +42,15 @@ ui <- fluidPage(
       .sidebar-section .form-group {
         margin-bottom: 10px;
       }
-      .sidebar-section .checkbox {
-        margin-top: 8px;
-        margin-bottom: 8px;
+      .preset-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .preset-actions .form-group {
+        flex: 1 1 100%;
+        margin-bottom: 6px;
       }
       .sidebar-actions .btn {
         margin-right: 8px;
@@ -59,6 +65,38 @@ ui <- fluidPage(
       .app-main {
         flex: 1;
         padding: 24px;
+        display: flex;
+        flex-direction: column;
+      }
+      .time-control-wrapper {
+        margin-bottom: 16px;
+        background-color: #fff;
+        border: 1px solid #dee2e6;
+        border-radius: 4px;
+        padding: 12px 16px;
+      }
+      .time-control-wrapper h5 {
+        margin-top: 0;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        color: #6c757d;
+      }
+      .time-control-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+      }
+      .time-control-row .preset-buttons {
+        flex: 1 1 auto;
+      }
+      .time-control-row .preset-buttons .radio-inline {
+        margin-right: 12px;
+      }
+      .time-control-row .date-range {
+        min-width: 260px;
       }
       .app-main .nav-tabs {
         margin-bottom: 16px;
@@ -112,6 +150,9 @@ ui <- fluidPage(
         margin: 0;
         padding-left: 18px;
       }
+      .comparison-controls {
+        margin-top: 12px;
+      }
       @media (max-width: 992px) {
         .app-container {
           flex-direction: column;
@@ -120,6 +161,14 @@ ui <- fluidPage(
           width: 100%;
           border-right: 0;
           border-bottom: 1px solid #dee2e6;
+        }
+        .time-control-row {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        .time-control-row .date-range {
+          width: 100%;
+          min-width: 0;
         }
       }
     '))
@@ -131,13 +180,14 @@ ui <- fluidPage(
       h2(class = "app-title", "Portfolio Monitor"),
       div(
         class = "sidebar-section",
-        h4("Portfolio"),
-        selectInput("sidebar_portfolio_group", label = NULL, choices = character(0))
-      ),
-      div(
-        class = "sidebar-section",
-        h4("Versions"),
-        checkboxGroupInput("sidebar_selected_versions", label = NULL, choices = list(), inline = FALSE)
+        h4("Portfolios"),
+        selectizeInput(
+          "sidebar_portfolio_groups",
+          label = NULL,
+          choices = character(0),
+          multiple = TRUE,
+          options = list(placeholder = "Select portfolios", plugins = list("remove_button"))
+        )
       ),
       div(
         class = "sidebar-section",
@@ -154,6 +204,7 @@ ui <- fluidPage(
     ),
     div(
       class = "app-main",
+      uiOutput("time_window_controls"),
       tabsetPanel(
         id = "main_tabs",
         tabPanel(
@@ -171,6 +222,10 @@ ui <- fluidPage(
         tabPanel(
           title = tagList(icon("clock-rotate-left"), "History"),
           div(class = "container-fluid", historyUI("history"))
+        ),
+        tabPanel(
+          title = tagList(icon("user"), "My Portfolio"),
+          div(class = "container-fluid", workspaceUI("workspace"))
         )
       )
     )
@@ -189,66 +244,205 @@ server <- function(input, output, session) {
       return(tibble())
     }
 
-    purrr::imap_dfr(portfolios, function(def, key) {
+    # Create metadata for individual versions
+    version_meta <- purrr::imap_dfr(portfolios, function(def, key) {
       tibble(
         key = key,
         portfolio_name = if (!is.null(def$portfolio_name)) def$portfolio_name else key,
         version_label = if (!is.null(def$version_label)) def$version_label else format(as.Date(def$start_date), "%Y-%m-%d"),
-        start_date = as.Date(def$start_date)
+        start_date = as.Date(def$start_date),
+        is_stitched = FALSE
       )
-    }) %>%
-      arrange(portfolio_name, desc(start_date))
+    })
+
+    # Create metadata for stitched portfolios
+    stitched_meta <- version_meta %>%
+      group_by(portfolio_name) %>%
+      summarise(
+        portfolio_name = portfolio_name[1],
+        key = paste0(portfolio_name[1], "_stitched"),
+        version_label = "Combined",
+        start_date = min(start_date),
+        is_stitched = TRUE,
+        .groups = "drop"
+      )
+
+    # Combine both types of metadata
+    bind_rows(version_meta, stitched_meta) %>%
+      arrange(portfolio_name, desc(is_stitched), desc(start_date))
+  })
+
+  comparison_state <- reactiveValues(extra_ids = character())
+  time_state <- reactiveValues(range = NULL, preset = "max")
+
+  observeEvent(portfolio_metadata(), {
+    meta <- portfolio_metadata()
+    groups <- sort(unique(meta$portfolio_name))
+    selected <- input$sidebar_portfolio_groups
+
+    if (length(groups) == 0) {
+      updateSelectizeInput(
+        session,
+        "sidebar_portfolio_groups",
+        choices = groups,
+        selected = character(0),
+        server = TRUE
+      )
+      return()
+    }
+
+    selected <- intersect(selected, groups)
+    if (length(selected) == 0) {
+      selected <- groups[1]
+    }
+
+    updateSelectizeInput(
+      session,
+      "sidebar_portfolio_groups",
+      choices = groups,
+      selected = selected,
+      server = TRUE
+    )
+
+    earliest <- suppressWarnings(min(meta$start_date, na.rm = TRUE))
+    if (!is.finite(earliest)) {
+      earliest <- Sys.Date() - 365
+    }
+    if (is.null(time_state$range) || length(time_state$range) != 2) {
+      time_state$range <- c(earliest, Sys.Date())
+      time_state$preset <- "max"
+    }
+  }, ignoreNULL = FALSE)
+
+  selected_groups <- reactive({
+    groups <- input$sidebar_portfolio_groups
+    if (is.null(groups) || length(groups) == 0) {
+      meta <- portfolio_metadata()
+      if (nrow(meta) == 0) {
+        return(character())
+      }
+      return(meta$portfolio_name[1])
+    }
+    groups
   })
 
   observe({
     meta <- portfolio_metadata()
-    choices <- unique(meta$portfolio_name)
-
-    if (length(choices) == 0) {
-      updateSelectInput(session, "sidebar_portfolio_group", choices = choices, selected = character(0))
+    if (nrow(meta) == 0) {
+      comparison_state$extra_ids <- character()
       return()
     }
-
-    selected <- input$sidebar_portfolio_group
-    if (is.null(selected) || !selected %in% choices) {
-      preferred <- choices[grepl('^high risk$', choices, ignore.case = TRUE)]
-      if (length(preferred) > 0) {
-        selected <- preferred[1]
-      } else {
-        selected <- choices[1]
-      }
+    groups <- selected_groups()
+    valid <- meta %>%
+      filter(key %in% comparison_state$extra_ids, portfolio_name %in% groups) %>%
+      pull(key)
+    if (!identical(sort(valid), sort(comparison_state$extra_ids))) {
+      comparison_state$extra_ids <- unique(valid)
     }
-
-    updateSelectInput(session, "sidebar_portfolio_group", choices = choices, selected = selected)
   })
 
-  observeEvent(list(input$sidebar_portfolio_group, portfolio_metadata()), {
+  output$time_window_controls <- renderUI({
     meta <- portfolio_metadata()
-    group <- input$sidebar_portfolio_group
+    if (nrow(meta) == 0) {
+      return(NULL)
+    }
+    earliest <- suppressWarnings(min(meta$start_date, na.rm = TRUE))
+    if (!is.finite(earliest)) {
+      earliest <- Sys.Date() - 365
+    }
+    current_range <- time_state$range
+    if (is.null(current_range) || length(current_range) != 2) {
+      current_range <- c(earliest, Sys.Date())
+    }
+    preset <- time_state$preset
+    if (is.null(preset) || !preset %in% c("ytd", "1y", "3y", "max", "custom")) {
+      preset <- "max"
+    }
 
-    if (is.null(group) || nrow(meta) == 0 || !group %in% meta$portfolio_name) {
-      updateCheckboxGroupInput(session, "sidebar_selected_versions", choices = list(), selected = character(0))
+    div(
+      class = "time-control-wrapper",
+      h5("Time Window"),
+      div(
+        class = "time-control-row",
+        div(
+          class = "preset-buttons",
+          radioButtons(
+            "time_window_preset",
+            label = NULL,
+            choices = c("YTD" = "ytd", "1Y" = "1y", "3Y" = "3y", "Max" = "max", "Custom" = "custom"),
+            selected = preset,
+            inline = TRUE
+          )
+        ),
+        div(
+          class = "date-range",
+          dateRangeInput(
+            "time_window_custom",
+            label = NULL,
+            start = current_range[1],
+            end = current_range[2],
+            min = earliest,
+            max = Sys.Date()
+          )
+        )
+      )
+    )
+  })
+
+  observeEvent(input$time_window_preset, {
+    preset <- input$time_window_preset
+    meta <- portfolio_metadata()
+    if (nrow(meta) == 0 || is.null(preset)) {
       return()
     }
-
-    group_meta <- meta %>%
-      filter(portfolio_name == group) %>%
-      arrange(desc(start_date))
-
-    choices <- stats::setNames(group_meta$key, group_meta$version_label)
-    defaults <- input$sidebar_selected_versions
-    if (is.null(defaults) || !all(defaults %in% group_meta$key)) {
-      defaults <- head(group_meta$key, n = min(2, nrow(group_meta)))
+    earliest <- suppressWarnings(min(meta$start_date, na.rm = TRUE))
+    if (!is.finite(earliest)) {
+      earliest <- Sys.Date() - 365
     }
-
-    updateCheckboxGroupInput(
-      session,
-      "sidebar_selected_versions",
-      choices = choices,
-      selected = defaults,
-      inline = FALSE
+    end_date <- Sys.Date()
+    if (preset == "custom") {
+      time_state$preset <- "custom"
+      return()
+    }
+    start_date <- switch(preset,
+      ytd = as.Date(paste0(format(end_date, "%Y"), "-01-01")),
+      `1y` = end_date - 365,
+      `3y` = end_date - (365 * 3),
+      max = earliest,
+      earliest
     )
-  }, ignoreNULL = FALSE)
+    start_date <- max(start_date, earliest, na.rm = TRUE)
+    if (start_date > end_date) {
+      start_date <- earliest
+    }
+    time_state$range <- c(start_date, end_date)
+    time_state$preset <- preset
+    updateDateRangeInput(session, "time_window_custom", start = start_date, end = end_date)
+  })
+
+  observeEvent(input$time_window_custom, {
+    range <- input$time_window_custom
+    if (is.null(range) || any(is.na(range))) {
+      return()
+    }
+    time_state$range <- as.Date(range)
+    time_state$preset <- "custom"
+    updateRadioButtons(session, "time_window_preset", selected = "custom")
+  }, ignoreNULL = TRUE)
+
+  output$sidebar_status <- renderUI({
+    meta <- portfolio_metadata()
+    if (nrow(meta) == 0) {
+      return(tags$p(class = "text-muted small mb-0", "No portfolios loaded."))
+    }
+    groups_total <- length(unique(meta$portfolio_name))
+    versions_total <- nrow(meta)
+    selected <- selected_groups()
+    tags$p(
+      class = "text-muted small mb-0",
+      sprintf("%d portfolio groups | %d versions | Selected: %s", groups_total, versions_total, paste(selected, collapse = ", "))
+    )
+  })
 
   observeEvent(input$sidebar_clear_cache, {
     clear_stock_data_cache()
@@ -259,31 +453,32 @@ server <- function(input, output, session) {
     showNotification("Reloaded portfolios from portfolio.xlsx.", type = "message")
   })
 
-  output$sidebar_status <- renderUI({
+  latest_version_keys <- reactive({
     meta <- portfolio_metadata()
-    if (nrow(meta) == 0) {
-      tags$p(class = "text-muted small mb-0", "No portfolios loaded.")
-    } else {
-      groups <- length(unique(meta$portfolio_name))
-      tags$p(
-        class = "text-muted small mb-0",
-        sprintf("%d portfolio groups | %d versions", groups, nrow(meta))
-      )
+    groups <- selected_groups()
+    if (length(groups) == 0 || nrow(meta) == 0) {
+      return(character())
     }
+    # Return stitched keys instead of individual version keys
+    paste0(groups, "_stitched")
   })
 
   selection_state <- reactive({
     meta <- portfolio_metadata()
-    group <- input$sidebar_portfolio_group
-    versions <- input$sidebar_selected_versions
-    valid_versions <- intersect(versions, meta$key)
-
+    groups <- selected_groups()
+    active_ids <- latest_version_keys()
+    comparison_ids <- intersect(comparison_state$extra_ids, meta$key)
     list(
       metadata = meta,
-      selected_group = group,
-      selected_ids = valid_versions,
+      selected_group = if (length(groups) > 0) groups[1] else NULL,
+      selected_groups = groups,
+      active_ids = active_ids,
+      selected_ids = unique(c(active_ids, comparison_ids)),
+      comparison_ids = comparison_ids,
       show_sp500 = isTRUE(input$sidebar_show_sp500),
-      show_btc = isTRUE(input$sidebar_show_btc)
+      show_btc = isTRUE(input$sidebar_show_btc),
+      date_range = time_state$range,
+      time_preset = time_state$preset
     )
   })
 
@@ -296,24 +491,63 @@ server <- function(input, output, session) {
       return(NULL)
     }
 
+    # Filter out stitched keys and get actual portfolio keys
+    meta <- portfolio_metadata()
+    actual_keys <- meta %>%
+      filter(key %in% selected, is_stitched == FALSE) %>%
+      pull(key)
+
+    # Also get all keys for selected groups to ensure stitching works
+    groups <- selected_groups()
+    group_keys <- meta %>%
+      filter(portfolio_name %in% groups, is_stitched == FALSE) %>%
+      pull(key)
+
+    all_keys <- unique(c(actual_keys, group_keys))
+
+    # Debug output
+    cat("Selected IDs:", paste(selected, collapse=", "), "\n")
+    cat("Actual keys to calculate:", paste(all_keys, collapse=", "), "\n")
+
     tryCatch({
-      portfolio_calc(
+      result <- portfolio_calc(
         portfolios = portfolios_reactive(),
-        selected_portfolios = selected,
+        selected_portfolios = all_keys,
         show_sp500 = sel$show_sp500,
         show_btc = sel$show_btc
       )
+
+      # Debug: print what portfolios were calculated
+      if (!is.null(result) && !is.null(result$portfolios)) {
+        cat("Calculated portfolios:", paste(names(result$portfolios), collapse=", "), "\n")
+      }
+
+      result
     }, error = function(e) {
       warning(paste("Portfolio calculation error:", e$message))
       NULL
     })
   })
 
-  performanceServer("performance", selection_state, portfolio_data)
+  set_comparisons <- function(ids) {
+    ids <- unique(ids)
+    meta <- portfolio_metadata()
+    valid <- intersect(ids, meta$key)
+    comparison_state$extra_ids <- valid
+  }
+
+  performanceServer(
+    "performance",
+    selection_state,
+    portfolio_data,
+    portfolio_metadata,
+    comparison_state,
+    set_comparisons
+  )
   riskServer("risk", selection_state, portfolio_data)
   holdingsServer("holdings", portfolios_reactive, selection_state, portfolio_data)
   historyServer("history", portfolios_reactive, portfolio_calc)
+  workspaceServer("workspace", portfolios_reactive, selection_state, portfolio_calc)
 }
 
 shinyApp(ui = ui, server = server)
-

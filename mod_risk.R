@@ -73,10 +73,12 @@ riskServer <- function(id, selection_state, portfolio_data) {
       if (is.null(sel)) {
         list(
           selected_ids = character(),
+          selected_groups = character(),
           selected_group = NULL,
           metadata = tibble(),
           show_sp500 = TRUE,
-          show_btc = TRUE
+          show_btc = TRUE,
+          date_range = NULL
         )
       } else {
         sel
@@ -87,14 +89,13 @@ riskServer <- function(id, selection_state, portfolio_data) {
       sel <- current_selection()
       ids <- sel$selected_ids
       metadata <- sel$metadata
-      group <- sel$selected_group
 
       if (is.null(metadata) || nrow(metadata) == 0) {
         return(tags$p("No portfolios loaded."))
       }
 
       if (is.null(ids) || length(ids) == 0) {
-        return(tags$p("Select at least one portfolio version in the sidebar."))
+        return(tags$p("Select at least one portfolio in the sidebar."))
       }
 
       selected_meta <- metadata %>%
@@ -102,15 +103,29 @@ riskServer <- function(id, selection_state, portfolio_data) {
         dplyr::arrange(dplyr::desc(start_date))
 
       if (nrow(selected_meta) == 0) {
-        return(tags$p("Selection unavailable; choose a different version."))
+        return(tags$p("Selection unavailable; choose a different portfolio."))
       }
+
+      date_range <- sel$date_range
+      range_text <- NULL
+      if (!is.null(date_range) && length(date_range) == 2 && all(!is.na(date_range))) {
+        range_text <- sprintf("Window: %s to %s", format(date_range[1]), format(date_range[2]))
+      }
+
+      group_labels <- selected_meta %>%
+        dplyr::distinct(portfolio_name) %>%
+        dplyr::pull(portfolio_name)
+      group_text <- if (length(group_labels) > 0) sprintf("Portfolios: %s", paste(group_labels, collapse = ", ")) else NULL
+
+      version_items <- lapply(seq_len(nrow(selected_meta)), function(i) {
+        tags$li(sprintf("%s - %s", selected_meta$portfolio_name[i], selected_meta$version_label[i]))
+      })
 
       tags$div(
         class = "selection-summary",
-        tags$p(if (!is.null(group) && !identical(group, "") && !is.na(group)) sprintf("Portfolio: %s", group) else "Portfolio: (multiple)"),
-        tags$ul(lapply(seq_len(nrow(selected_meta)), function(i) {
-          tags$li(sprintf("%s", selected_meta$version_label[i]))
-        }))
+        if (!is.null(group_text)) tags$p(group_text) else NULL,
+        if (!is.null(range_text)) tags$p(range_text) else NULL,
+        tags$ul(version_items)
       )
     })
 
@@ -118,16 +133,19 @@ riskServer <- function(id, selection_state, portfolio_data) {
       data <- tryCatch(portfolio_data(), error = function(e) NULL)
       sel <- current_selection()
       metadata <- sel$metadata
+      ids <- sel$selected_ids
 
-      if (is.null(data)) {
+      if (is.null(data) || is.null(ids) || length(ids) == 0) {
         return(NULL)
       }
 
       if (is.null(metadata) || nrow(metadata) == 0) {
-        return(data)
+        trimmed <- data
+      } else {
+        trimmed <- tryCatch(trim_portfolio_results(data, metadata), error = function(e) data)
       }
 
-      tryCatch(trim_portfolio_results(data, metadata), error = function(e) data)
+      apply_date_window(trimmed, sel$date_range)
     })
 
     risk_metrics <- reactive({
@@ -343,6 +361,45 @@ trim_portfolio_results <- function(result, metadata) {
 
   result
 }
+
+apply_date_window <- function(result, date_range) {
+  if (is.null(result) || is.null(date_range) || length(date_range) != 2 || any(is.na(date_range))) {
+    return(result)
+  }
+
+  start_date <- as.Date(date_range[1])
+  end_date <- as.Date(date_range[2])
+
+  filter_series <- function(series) {
+    if (is.null(series) || is.null(series$dates)) return(NULL)
+    dates <- as.Date(series$dates)
+    keep <- dates >= start_date & dates <= end_date
+    if (!any(keep)) return(NULL)
+
+    series$dates <- dates[keep]
+    if (!is.null(series$cumulative_returns)) {
+      series$cumulative_returns <- as.numeric(series$cumulative_returns[keep])
+    }
+    if (!is.null(series$portfolio_tbl)) {
+      series$portfolio_tbl <- series$portfolio_tbl %>% dplyr::filter(date >= start_date, date <= end_date)
+    }
+    if (!is.null(series$individual_stocks)) {
+      series$individual_stocks <- series$individual_stocks %>% dplyr::filter(date >= start_date, date <= end_date)
+    }
+    series
+  }
+
+  if (!is.null(result$portfolios)) {
+    result$portfolios <- lapply(result$portfolios, filter_series)
+    result$portfolios <- Filter(Negate(is.null), result$portfolios)
+  }
+
+  result$sp500 <- filter_series(result$sp500)
+  result$bitcoin <- filter_series(result$bitcoin)
+
+  result
+}
+
 
 #' Calculate daily returns for all portfolios and benchmarks
 calculate_all_returns <- function(data) {
@@ -566,3 +623,6 @@ calculate_risk_metrics <- function(data) {
     dplyr::tibble()
   }
 }
+
+
+

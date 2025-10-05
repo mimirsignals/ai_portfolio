@@ -165,6 +165,15 @@ calculate_all_portfolios_with_inheritance <- function(portfolios, selected_portf
       previous_key <- key
     }
 
+    # Create stitched portfolio combining all versions
+    if (length(group_results) > 0) {
+      stitched_key <- paste0(group_name, "_stitched")
+      stitched_data <- stitch_portfolio_versions(group_results, chain_keys)
+      if (!is.null(stitched_data)) {
+        results[[stitched_key]] <- stitched_data
+      }
+    }
+
     for (key in intersect(names(group_results), available)) {
       results[[key]] <- group_results[[key]]
     }
@@ -449,6 +458,59 @@ build_transaction_log <- function(portfolio_name, portfolio_key, rebalance_date,
       previous_weight,
       target_weight
     )
+}
+
+stitch_portfolio_versions <- function(group_results, chain_keys) {
+  if (length(group_results) == 0 || length(chain_keys) == 0) return(NULL)
+
+  # Combine all dates and cumulative returns from each version
+  all_dates <- c()
+  all_returns <- c()
+  all_portfolio_tbl <- list()
+  all_individual_stocks <- list()
+
+  for (key in chain_keys) {
+    version_data <- group_results[[key]]
+    if (is.null(version_data)) next
+
+    all_dates <- c(all_dates, version_data$dates)
+    all_returns <- c(all_returns, version_data$cumulative_returns)
+    all_portfolio_tbl[[key]] <- version_data$portfolio_tbl
+    all_individual_stocks[[key]] <- version_data$individual_stocks
+  }
+
+  if (length(all_dates) == 0) return(NULL)
+
+  # Combine and sort by date, keeping unique dates (prefer later versions on same date)
+  combined_df <- tibble::tibble(
+    date = as.Date(all_dates),
+    cumulative_return = as.numeric(all_returns)
+  ) %>%
+    dplyr::arrange(date) %>%
+    dplyr::distinct(date, .keep_all = TRUE)
+
+  # Get original investment from first version
+  first_version <- group_results[[chain_keys[1]]]
+  original_investment <- first_version$original_investment
+
+  # Combine portfolio tables
+  portfolio_tbl <- dplyr::bind_rows(all_portfolio_tbl) %>%
+    dplyr::arrange(date) %>%
+    dplyr::distinct(date, .keep_all = TRUE)
+
+  # Combine individual stocks
+  individual_stocks <- dplyr::bind_rows(all_individual_stocks) %>%
+    dplyr::arrange(date, symbol) %>%
+    dplyr::distinct(date, symbol, .keep_all = TRUE)
+
+  list(
+    dates = combined_df$date,
+    cumulative_returns = combined_df$cumulative_return,
+    portfolio_tbl = portfolio_tbl,
+    individual_stocks = individual_stocks,
+    original_investment = original_investment,
+    is_stitched = TRUE
+  )
 }
 
 build_rebalanced_segment <- function(symbols, weights, total_investment, rebalance_date) {
