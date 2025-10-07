@@ -116,6 +116,21 @@ calculate_all_portfolios_with_inheritance <- function(portfolios, selected_portf
             daily_return = as.numeric(daily_return)
           )
 
+        # Debug: Check Oct 5-6 for base portfolio
+        if (any(portfolio_tbl$date >= as.Date("2025-10-05"))) {
+          oct_idx <- portfolio_tbl$date >= as.Date("2025-10-05") & portfolio_tbl$date <= as.Date("2025-10-06")
+          if (any(oct_idx)) {
+            message(sprintf("DEBUG BASE PORTFOLIO [%s]:", key))
+            message(sprintf("  - original_investment: %.2f", original_investment))
+            oct_data <- portfolio_tbl[oct_idx, ]
+            for (i in seq_len(nrow(oct_data))) {
+              message(sprintf("  - %s: investment=%.2f, cum_return=%.4f%%",
+                              oct_data$date[i], oct_data$investment[i],
+                              cumulative_returns[which(portfolio_tbl$date == oct_data$date[i])] * 100))
+            }
+          }
+        }
+
         group_results[[key]] <- list(
           dates = portfolio_tbl$date,
           cumulative_returns = cumulative_returns,
@@ -284,6 +299,25 @@ run_rebalance_segment <- function(current_def, previous_entry, portfolio_key) {
   original_investment <- get_original_investment_baseline(previous_entry, current_def)
   cumulative_returns <- (segment$portfolio_tbl$investment / original_investment) - 1
 
+  # Debug: Check for anomalies in recent dates
+  if (any(segment$portfolio_tbl$date >= as.Date("2025-10-05"))) {
+    recent_idx <- segment$portfolio_tbl$date >= as.Date("2025-10-05") & segment$portfolio_tbl$date <= as.Date("2025-10-06")
+    if (any(recent_idx)) {
+      message(sprintf("DEBUG run_rebalance_segment [%s]:", portfolio_key))
+      message(sprintf("  - original_investment: %.2f", original_investment))
+      message(sprintf("  - total_investment (rebalance): %.2f", total_investment))
+      message(sprintf("  - rebalance_date: %s", rebalance_date))
+
+      recent_data <- segment$portfolio_tbl[recent_idx, ]
+      for (i in seq_len(nrow(recent_data))) {
+        message(sprintf("  - Oct %s: investment=%.2f, cum_return=%.4f",
+                        format(recent_data$date[i], "%d"),
+                        recent_data$investment[i],
+                        cumulative_returns[which(segment$portfolio_tbl$date == recent_data$date[i])]))
+      }
+    }
+  }
+
   individual_stocks <- segment$individual_stocks %>%
     dplyr::mutate(
       date = as.Date(date),
@@ -317,12 +351,18 @@ get_latest_portfolio_snapshot <- function(portfolio_tbl, cutoff_date) {
 }
 
 get_original_investment_baseline <- function(previous_entry, current_def) {
-  # Try to get from previous entry metadata first
-  if (!is.null(previous_entry) && !is.null(previous_entry$original_investment)) {
+  # For the first portfolio in a chain, use the initial investment amount
+  if (is.null(previous_entry)) {
+    return(as.numeric(current_def$total_investment))
+  }
+
+  # For rebalanced portfolios, use the original investment from the chain
+  # This ensures cumulative returns are calculated consistently across all rebalances
+  if (!is.null(previous_entry$original_investment)) {
     return(previous_entry$original_investment)
   }
-  
-  # Fallback to current definition (for initial portfolio or backward compatibility)
+
+  # Fallback to current definition (for backward compatibility)
   return(as.numeric(current_def$total_investment))
 }
 
@@ -479,23 +519,35 @@ build_rebalanced_segment <- function(symbols, weights, total_investment, rebalan
 
   performance <- NULL
   if (!is.null(future_data) && nrow(future_data) > 0) {
+    # Check if we have data for all symbols on or near the rebalance date
+    earliest_by_symbol <- future_data %>%
+      dplyr::group_by(symbol) %>%
+      dplyr::summarise(first_date = min(date), .groups = 'drop')
+
+    missing_rebalance_date <- !all(earliest_by_symbol$first_date <= rebalance_date)
+
+    if (missing_rebalance_date) {
+      max_delay <- max(earliest_by_symbol$first_date) - as.Date(rebalance_date)
+      message(sprintf("DEBUG build_rebalanced_segment: rebalance_date=%s, max_delay=%d days",
+                      rebalance_date, as.numeric(max_delay)))
+      for (i in seq_len(nrow(earliest_by_symbol))) {
+        message(sprintf("  - %s: first_date=%s", earliest_by_symbol$symbol[i], earliest_by_symbol$first_date[i]))
+      }
+    }
+
     performance <- calculate_weighted_portfolio(future_data, symbols, weights, total_investment)
   }
 
+  # Create the rebalance baseline row with the inherited value
   portfolio_row <- tibble::tibble(
     date = as.Date(rebalance_date),
     investment = total_investment,
     daily_return = 0
   )
 
-  individual_rows <- tibble::tibble(
-    date = rep(as.Date(rebalance_date), length(symbols)),
-    symbol = symbols,
-    investment = target_values,
-    daily_return = 0
-  )
-
   if (!is.null(performance) && !is.null(performance$portfolio_tbl) && nrow(performance$portfolio_tbl) > 0) {
+    # Always prepend the rebalance row, then remove duplicates
+    # This ensures the rebalance value (total_investment) takes precedence
     portfolio_tbl <- dplyr::bind_rows(portfolio_row, performance$portfolio_tbl) %>%
       dplyr::mutate(
         date = as.Date(date),
@@ -505,8 +557,17 @@ build_rebalanced_segment <- function(symbols, weights, total_investment, rebalan
       dplyr::arrange(date) %>%
       dplyr::distinct(date, .keep_all = TRUE)
   } else {
+    # No performance data - just use the rebalance row
     portfolio_tbl <- portfolio_row
   }
+
+  # Handle individual stocks similarly
+  individual_rows <- tibble::tibble(
+    date = rep(as.Date(rebalance_date), length(symbols)),
+    symbol = symbols,
+    investment = target_values,
+    daily_return = 0
+  )
 
   if (!is.null(performance) && !is.null(performance$individual_stocks) && nrow(performance$individual_stocks) > 0) {
     individual_tbl <- dplyr::bind_rows(individual_rows, performance$individual_stocks) %>%

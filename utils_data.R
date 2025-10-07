@@ -152,8 +152,18 @@ calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_inv
     # This ensures cumulative returns always start at exactly 0%
     # Must be done AFTER type conversion and filtering to ensure it persists
     if (nrow(portfolio_tbl) > 0) {
+      first_date <- portfolio_tbl$date[1]
+      first_investment_before <- portfolio_tbl$investment[1]
+
       portfolio_tbl[1, "investment"] <- as.numeric(total_investment)
       portfolio_tbl[1, "daily_return"] <- 0
+
+      # Debug: Detect large discrepancies (potential data issues)
+      discrepancy_pct <- abs((first_investment_before - total_investment) / total_investment) * 100
+      if (discrepancy_pct > 5) {
+        message(sprintf("WARNING: Large discrepancy in first day calculation for %s: expected %.2f, calculated %.2f (%.1f%% diff)",
+                        first_date, total_investment, first_investment_before, discrepancy_pct))
+      }
     }
     
     if (nrow(portfolio_tbl) == 0) {
@@ -379,12 +389,26 @@ fetch_stock_data <- function(symbols, start_date) {
     return(NULL)
   }
 
-  all_stock_data <- dplyr::bind_rows(stock_data_list[valid_entries]) %>%
+  combined_data <- dplyr::bind_rows(stock_data_list[valid_entries]) %>%
     dplyr::mutate(
       date = as.Date(date),
       symbol = as.character(symbol),
-      adjusted_price = as.numeric(adjusted_price)
-    ) %>%
+      adjusted_price = as.numeric(adjusted_price),
+      weekday = lubridate::wday(date)  # 1 = Sunday, 7 = Saturday
+    )
+
+  # Check for weekend data before filtering
+  weekend_data <- combined_data %>%
+    dplyr::filter(weekday == 1 | weekday == 7)
+
+  if (nrow(weekend_data) > 0) {
+    weekend_dates <- unique(weekend_data$date)
+    message(sprintf("WARNING: Found %d weekend data points, filtering them out: %s",
+                    nrow(weekend_data),
+                    paste(format(head(weekend_dates, 5), "%Y-%m-%d"), collapse = ", ")))
+  }
+
+  all_stock_data <- combined_data %>%
     dplyr::filter(
       !is.na(date),
       !is.na(symbol),
@@ -393,14 +417,34 @@ fetch_stock_data <- function(symbols, start_date) {
       is.finite(adjusted_price),
       adjusted_price > 0,
       date >= start_date,
-      date <= end_date
+      date <= end_date,
+      weekday >= 2,  # Monday = 2
+      weekday <= 6   # Friday = 6
     ) %>%
+    dplyr::select(-weekday) %>%  # Remove the helper column
     dplyr::arrange(date, symbol) %>%
     dplyr::distinct(date, symbol, .keep_all = TRUE)
 
   if (nrow(all_stock_data) == 0) {
     warning("No valid stock data retrieved")
     return(NULL)
+  }
+
+  # Debug: Check for data completeness in recent dates (weekdays only)
+  max_date <- max(all_stock_data$date, na.rm = TRUE)
+  if (max_date >= as.Date("2025-10-04")) {
+    recent_data <- all_stock_data %>%
+      dplyr::filter(date >= as.Date("2025-10-04"), date <= as.Date("2025-10-07"))
+
+    if (nrow(recent_data) > 0) {
+      message(sprintf("DEBUG fetch_stock_data: Oct 4-7 data (weekdays only) found for %d symbol-date combinations", nrow(recent_data)))
+      for (sym in unique(recent_data$symbol)) {
+        sym_dates <- recent_data$date[recent_data$symbol == sym]
+        message(sprintf("  - %s: dates %s (should skip Oct 4-5 weekends)", sym, paste(format(sym_dates, "%Y-%m-%d"), collapse = ", ")))
+      }
+    } else {
+      message("DEBUG fetch_stock_data: NO Oct 4-7 data found despite max_date >= 2025-10-04")
+    }
   }
 
   return(all_stock_data)
