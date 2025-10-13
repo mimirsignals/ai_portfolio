@@ -301,6 +301,8 @@ fetch_stock_data <- function(symbols, start_date) {
   start_date <- as.Date(start_date)
   end_date <- as.Date(end_date)
 
+  use_cache <- isTRUE(getOption("portfolio_cache_enabled", FALSE))
+
   fetch_quantmod <- function(symbol) {
     tryCatch({
       xts_data <- suppressWarnings(suppressMessages(
@@ -364,7 +366,7 @@ fetch_stock_data <- function(symbols, start_date) {
 
   get_symbol_data <- function(symbol) {
     cache_key <- paste(symbol, start_date, end_date, sep = "|")
-    if (exists(cache_key, envir = .stock_data_cache, inherits = FALSE)) {
+    if (use_cache && exists(cache_key, envir = .stock_data_cache, inherits = FALSE)) {
       return(get(cache_key, envir = .stock_data_cache, inherits = FALSE))
     }
 
@@ -374,7 +376,9 @@ fetch_stock_data <- function(symbols, start_date) {
     }
 
     if (!is.null(stock_df) && nrow(stock_df) > 0) {
-      assign(cache_key, stock_df, envir = .stock_data_cache)
+      if (use_cache) {
+        assign(cache_key, stock_df, envir = .stock_data_cache)
+      }
       return(stock_df)
     }
 
