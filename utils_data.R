@@ -65,8 +65,9 @@ calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_inv
         arrange(date)
 
       if (nrow(symbol_data) > 0) {
-        # Calculate performance based on price changes
-        initial_price <- symbol_data$adjusted_price[1]
+        # Use opening price on first date as entry point (rebalancing happens at market open)
+        # Then track performance using adjusted closing prices
+        initial_price <- symbol_data$open_price[1]
         first_date <- symbol_data$date[1]
 
         if (is.na(initial_price) || initial_price <= 0) {
@@ -241,29 +242,87 @@ run_portfolio_calculations <- function(symbols, weights, start_date, total_inves
   
   # Normalize weights
   weights <- weights / sum(weights)
-  
+
+  cash_idx <- toupper(symbols) == "CASH"
+  cash_weight <- sum(weights[cash_idx], na.rm = TRUE)
+  cash_weight <- min(max(cash_weight, 0), 1)
+
+  non_cash_symbols <- symbols[!cash_idx]
+  non_cash_weights <- weights[!cash_idx]
+  non_cash_weight_sum <- sum(non_cash_weights)
+
+  cash_value <- as.numeric(total_investment * cash_weight)
+  investable_total <- as.numeric(total_investment - cash_value)
+  if (!is.finite(investable_total) || investable_total < 0) {
+    investable_total <- 0
+  }
+
+  investable_fraction <- if (total_investment > 0) investable_total / total_investment else 0
+
   tryCatch({
-    # Get stock data
-    stock_data <- fetch_stock_data(symbols, start_date)
-    
-    if (is.null(stock_data) || nrow(stock_data) == 0) {
-      warning(paste("No stock data available for portfolio:", portfolio_name))
+    if (length(non_cash_symbols) > 0 && investable_total > 0 && non_cash_weight_sum > 0) {
+      adjusted_weights <- non_cash_weights / non_cash_weight_sum
+
+      stock_data <- fetch_stock_data(non_cash_symbols, start_date)
+      if (is.null(stock_data) || nrow(stock_data) == 0) {
+        warning(paste("No stock data available for portfolio:", portfolio_name))
+        return(NULL)
+      }
+
+      portfolio_performance <- calculate_weighted_portfolio(
+        stock_data,
+        non_cash_symbols,
+        adjusted_weights,
+        investable_total
+      )
+
+      if (is.null(portfolio_performance)) {
+        warning(paste("Portfolio calculation failed for portfolio:", portfolio_name))
+        return(NULL)
+      }
+
+      portfolio_tbl <- portfolio_performance$portfolio_tbl %>%
+        dplyr::mutate(
+          investment = investment + cash_value,
+          daily_return = daily_return * investable_fraction
+        )
+
+      individual_stocks <- portfolio_performance$individual_stocks
+      if (cash_value > 0) {
+        cash_rows <- tibble::tibble(
+          date = portfolio_tbl$date,
+          symbol = "CASH",
+          investment = cash_value,
+          daily_return = 0
+        )
+        individual_stocks <- dplyr::bind_rows(individual_stocks, cash_rows) %>%
+          dplyr::arrange(date, symbol)
+      }
+
+    } else if (cash_value > 0) {
+      base_date <- as.Date(start_date)
+      portfolio_tbl <- tibble::tibble(
+        date = base_date,
+        investment = total_investment,
+        daily_return = 0
+      )
+      individual_stocks <- tibble::tibble(
+        date = base_date,
+        symbol = "CASH",
+        investment = total_investment,
+        daily_return = 0
+      )
+
+    } else {
+      warning(paste("No investable assets or cash for portfolio:", portfolio_name))
       return(NULL)
     }
-    
-    # Calculate portfolio performance
-    portfolio_performance <- calculate_weighted_portfolio(stock_data, symbols, weights, total_investment)
-    
-    if (is.null(portfolio_performance)) {
-      warning(paste("Portfolio calculation failed for portfolio:", portfolio_name))
-      return(NULL)
-    }
-    
+
     return(list(
-      portfolio_tbl = portfolio_performance$portfolio_tbl,
-      individual_stocks = portfolio_performance$individual_stocks
+      portfolio_tbl = portfolio_tbl,
+      individual_stocks = individual_stocks
     ))
-    
+
   }, error = function(e) {
     warning(paste("Error calculating portfolio performance for", portfolio_name, ":", e$message))
     return(NULL)
@@ -321,11 +380,14 @@ fetch_stock_data <- function(symbols, start_date) {
       stock_df <- data.frame(
         date = as.Date(index(xts_data)),
         symbol = as.character(symbol),
+        open_price = as.numeric(quantmod::Op(xts_data)),
         adjusted_price = as.numeric(quantmod::Ad(xts_data)),
         stringsAsFactors = FALSE
       )
 
-      stock_df[is.finite(stock_df$adjusted_price) & stock_df$adjusted_price > 0 & !is.na(stock_df$date), , drop = FALSE]
+      stock_df[is.finite(stock_df$adjusted_price) & stock_df$adjusted_price > 0 &
+               is.finite(stock_df$open_price) & stock_df$open_price > 0 &
+               !is.na(stock_df$date), , drop = FALSE]
     }, error = function(e) {
       NULL
     })
@@ -347,11 +409,13 @@ fetch_stock_data <- function(symbols, start_date) {
       warning = function(w) NULL
     )
 
-    if (is.null(csv_df) || !("Adj.Close" %in% names(csv_df))) {
+    if (is.null(csv_df) || !("Adj.Close" %in% names(csv_df)) || !("Open" %in% names(csv_df))) {
       return(NULL)
     }
 
-    csv_df <- csv_df[!is.na(csv_df$Adj.Close) & csv_df$Adj.Close > 0 & !is.na(csv_df$Date), , drop = FALSE]
+    csv_df <- csv_df[!is.na(csv_df$Adj.Close) & csv_df$Adj.Close > 0 &
+                     !is.na(csv_df$Open) & csv_df$Open > 0 &
+                     !is.na(csv_df$Date), , drop = FALSE]
     if (nrow(csv_df) == 0) {
       return(NULL)
     }
@@ -359,6 +423,7 @@ fetch_stock_data <- function(symbols, start_date) {
     data.frame(
       date = as.Date(csv_df$Date),
       symbol = as.character(symbol),
+      open_price = as.numeric(csv_df$Open),
       adjusted_price = as.numeric(csv_df$Adj.Close),
       stringsAsFactors = FALSE
     )
@@ -397,6 +462,7 @@ fetch_stock_data <- function(symbols, start_date) {
     dplyr::mutate(
       date = as.Date(date),
       symbol = as.character(symbol),
+      open_price = as.numeric(open_price),
       adjusted_price = as.numeric(adjusted_price),
       weekday = lubridate::wday(date)  # 1 = Sunday, 7 = Saturday
     )
@@ -417,6 +483,9 @@ fetch_stock_data <- function(symbols, start_date) {
       !is.na(date),
       !is.na(symbol),
       symbol != "",
+      !is.na(open_price),
+      is.finite(open_price),
+      open_price > 0,
       !is.na(adjusted_price),
       is.finite(adjusted_price),
       adjusted_price > 0,

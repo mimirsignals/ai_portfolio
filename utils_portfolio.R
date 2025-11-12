@@ -402,7 +402,8 @@ fetch_prices_on_or_before <- function(symbols, cutoff_date) {
     dplyr::slice_tail(n = 1) %>%
     dplyr::ungroup()
 
-  prices <- price_tbl$adjusted_price
+  # Use opening price for rebalancing (executes at market open)
+  prices <- price_tbl$open_price
   names(prices) <- price_tbl$symbol
 
   missing_symbols <- setdiff(symbols, names(prices))
