@@ -183,6 +183,30 @@ server <- function(input, output, session) {
     load_portfolios_from_excel("portfolio.xlsx")
   })
 
+  # Preload stock data at startup and on reload
+  observe({
+    portfolios <- portfolios_reactive()
+
+    if (length(portfolios) > 0) {
+      all_symbols <- extract_all_symbols(portfolios)
+
+      if (length(all_symbols) > 0) {
+        withProgress(message = "Loading stock data...", value = 0, {
+          preload_stock_data(
+            symbols = all_symbols,
+            start_date = "2025-05-20"
+          )
+        })
+
+        showNotification(
+          sprintf("Preloaded data for %d symbols", length(all_symbols)),
+          type = "message",
+          duration = 3
+        )
+      }
+    }
+  }) %>% bindEvent(portfolios_reactive(), ignoreNULL = TRUE, ignoreInit = FALSE)
+
   portfolio_metadata <- reactive({
     portfolios <- portfolios_reactive()
     if (length(portfolios) == 0) {
@@ -238,7 +262,7 @@ server <- function(input, output, session) {
     choices <- stats::setNames(group_meta$key, group_meta$version_label)
     defaults <- input$sidebar_selected_versions
     if (is.null(defaults) || !all(defaults %in% group_meta$key)) {
-      defaults <- head(group_meta$key, n = min(2, nrow(group_meta)))
+      defaults <- group_meta$key  # Select ALL versions by default
     }
 
     updateCheckboxGroupInput(

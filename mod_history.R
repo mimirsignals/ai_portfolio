@@ -17,12 +17,34 @@ historyUI <- function(id) {
 historyServer <- function(id, portfolios_reactive, portfolio_calc) {
   moduleServer(id, function(input, output, session) {
 
+    # Calculate ALL portfolios ONCE (cached in reactive)
+    all_portfolio_calcs <- reactive({
+      portfolios <- portfolios_reactive()
+
+      if (length(portfolios) == 0) return(NULL)
+
+      tryCatch({
+        portfolio_calc(
+          portfolios = portfolios,
+          selected_portfolios = names(portfolios),
+          show_sp500 = FALSE,
+          show_btc = FALSE
+        )
+      }, error = function(e) {
+        warning(paste("History module calculation error:", e$message))
+        NULL
+      })
+    })
+
     history_data <- reactive({
       portfolios <- portfolios_reactive()
+      calc <- all_portfolio_calcs()
+
       if (length(portfolios) == 0) {
         return(tibble())
       }
 
+      # Build metadata
       meta <- purrr::imap_dfr(portfolios, function(def, key) {
         tibble(
           key = key,
@@ -33,19 +55,8 @@ historyServer <- function(id, portfolios_reactive, portfolio_calc) {
         )
       })
 
-      calc <- tryCatch({
-        portfolio_calc(
-          portfolios = portfolios_reactive(),
-          selected_portfolios = names(portfolios),
-          show_sp500 = FALSE,
-          show_btc = FALSE
-        )
-      }, error = function(e) {
-        warning(paste("History module calculation error:", e$message))
-        NULL
-      })
-
-      if (!is.null(calc)) {
+      # Attach returns from cached calculations
+      if (!is.null(calc) && !is.null(calc$portfolios)) {
         returns_df <- purrr::imap_dfr(calc$portfolios, function(series, name) {
           latest_return <- NA_real_
           if (!is.null(series$cumulative_returns) && length(series$cumulative_returns) > 0) {

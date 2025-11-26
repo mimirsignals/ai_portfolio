@@ -16,6 +16,88 @@ clear_stock_data_cache <- function(symbols = NULL) {
   invisible(TRUE)
 }
 
+#' Extract all unique symbols from portfolio definitions
+#' @param portfolios List of portfolio definitions
+#' @return Character vector of unique symbols (excluding CASH)
+extract_all_symbols <- function(portfolios) {
+  if (length(portfolios) == 0) return(character(0))
+
+  all_symbols <- unique(unlist(lapply(portfolios, function(p) {
+    if (!is.null(p$symbols)) as.character(p$symbols) else character(0)
+  })))
+
+  # Remove CASH and empty strings
+  all_symbols <- all_symbols[!is.na(all_symbols) &
+                              all_symbols != "" &
+                              toupper(all_symbols) != "CASH"]
+  unique(all_symbols)
+}
+
+#' Preload stock data for all symbols with progress tracking
+#' @param symbols Character vector of stock symbols
+#' @param start_date Start date for data fetch (default: "2025-05-20")
+#' @return Invisible TRUE if successful
+preload_stock_data <- function(symbols, start_date = "2025-05-20") {
+  if (length(symbols) == 0) {
+    message("No symbols to preload")
+    return(invisible(TRUE))
+  }
+
+  symbols <- symbols[toupper(symbols) != "CASH"]
+  start_date <- as.Date(start_date)
+  end_date <- Sys.Date() + 1
+
+  # Check which symbols are already cached
+  if (isTRUE(getOption("portfolio_cache_enabled", FALSE))) {
+    cached_symbols <- sapply(symbols, function(sym) {
+      cache_key <- paste(sym, start_date, end_date, sep = "|")
+      exists(cache_key, envir = .stock_data_cache, inherits = FALSE)
+    })
+    symbols_to_fetch <- symbols[!cached_symbols]
+
+    if (length(symbols_to_fetch) < length(symbols)) {
+      message(sprintf("Skipping %d already-cached symbols", sum(cached_symbols)))
+    }
+  } else {
+    symbols_to_fetch <- symbols
+  }
+
+  if (length(symbols_to_fetch) == 0) {
+    message("All symbols already cached")
+    return(invisible(TRUE))
+  }
+
+  message(sprintf("Preloading %d symbols from %s onwards...",
+                  length(symbols_to_fetch), start_date))
+
+  # Fetch sequentially with progress
+  results <- lapply(seq_along(symbols_to_fetch), function(i) {
+    sym <- symbols_to_fetch[i]
+
+    # Update progress if we're in a withProgress context
+    tryCatch({
+      incProgress(1/length(symbols_to_fetch),
+                  detail = sprintf("Fetching %s (%d/%d)", sym, i, length(symbols_to_fetch)))
+    }, error = function(e) {
+      # Silently ignore if not in a progress context
+    })
+
+    tryCatch({
+      fetch_stock_data(sym, start_date)
+      TRUE
+    }, error = function(e) {
+      warning(sprintf("Failed to preload %s: %s", sym, e$message))
+      FALSE
+    })
+  })
+
+  success_count <- sum(unlist(results))
+  message(sprintf("Preloaded %d/%d symbols successfully",
+                  success_count, length(symbols_to_fetch)))
+
+  invisible(TRUE)
+}
+
 #' Calculate weighted portfolio performance - FIXED VERSION
 #' @param stock_data Data frame with stock data
 #' @param symbols Vector of symbols

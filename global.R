@@ -6,6 +6,9 @@ library(quantmod)
 library(plotly)
 library(DT)
 
+# Enable portfolio data caching by default
+options(portfolio_cache_enabled = TRUE)
+
 # Lightweight replacement for shinydashboard::box
 box <- function(..., title = NULL, status = NULL, solidHeader = FALSE, width = 12) {
   if (is.null(width)) {

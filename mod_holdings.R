@@ -230,49 +230,22 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
       }
 
       rebalance_date <- as.Date(def$start_date)
-      fallback_data <- portfolio_entry$individual_stocks
 
-      start_fetch <- rebalance_date
-      if (is.na(start_fetch) && !is.null(fallback_data)) {
-        start_fetch <- suppressWarnings(min(fallback_data$date, na.rm = TRUE))
-      }
+      # Use individual_stocks data (already calculated, no need to fetch)
+      stock_performance <- portfolio_entry$individual_stocks %>%
+        dplyr::filter(symbol %in% def$symbols) %>%
+        dplyr::filter(is.na(rebalance_date) | date >= rebalance_date) %>%
+        dplyr::group_by(symbol) %>%
+        dplyr::arrange(date) %>%
+        dplyr::mutate(
+          investment = as.numeric(investment),
+          baseline_value = dplyr::first(investment),
+          cumulative_return = ((investment / baseline_value) - 1) * 100
+        ) %>%
+        dplyr::ungroup() %>%
+        dplyr::filter(is.finite(cumulative_return))
 
-      stock_prices <- NULL
-      if (!is.na(start_fetch)) {
-        stock_prices <- fetch_stock_data(def$symbols, start_fetch)
-      }
-
-      if (!is.null(stock_prices) && nrow(stock_prices) > 0) {
-        stock_performance <- stock_prices %>%
-          dplyr::filter(symbol %in% def$symbols) %>%
-          dplyr::filter(is.na(rebalance_date) | date >= rebalance_date) %>%
-          dplyr::group_by(symbol) %>%
-          dplyr::arrange(date) %>%
-          dplyr::mutate(
-            adjusted_price = as.numeric(adjusted_price),
-            baseline_price = dplyr::first(adjusted_price),
-            cumulative_return = ((adjusted_price / baseline_price) - 1) * 100
-          ) %>%
-          dplyr::ungroup() %>%
-          dplyr::filter(is.finite(cumulative_return))
-      } else if (!is.null(fallback_data)) {
-        stock_performance <- fallback_data %>%
-          dplyr::filter(symbol %in% def$symbols) %>%
-          dplyr::filter(is.na(rebalance_date) | date >= rebalance_date) %>%
-          dplyr::group_by(symbol) %>%
-          dplyr::arrange(date) %>%
-          dplyr::mutate(
-            investment = as.numeric(investment),
-            baseline_value = dplyr::first(investment),
-            cumulative_return = ((investment / baseline_value) - 1) * 100
-          ) %>%
-          dplyr::ungroup() %>%
-          dplyr::filter(is.finite(cumulative_return))
-      } else {
-        stock_performance <- NULL
-      }
-
-      if (is.null(stock_performance) || nrow(stock_performance) == 0) {
+      if (nrow(stock_performance) == 0) {
         return(plotly_empty("No holdings performance data"))
       }
 
