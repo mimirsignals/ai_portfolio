@@ -162,6 +162,7 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
           is.null(portfolio_entry$individual_stocks)) {
 
         target_weights_df$Actual_Weight <- "N/A"
+        target_weights_df$Avg_Purchase_Price <- "N/A"
 
       } else {
         latest_values <- portfolio_entry$individual_stocks %>%
@@ -174,23 +175,67 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
           dplyr::mutate(actual_weight_pct = (investment / sum(investment)) * 100) %>%
           dplyr::select(symbol, actual_weight_pct)
 
+        # Calculate average purchase price from transaction history
+        # Get ALL transactions for this portfolio and its predecessors
+        data <- tryCatch(portfolio_data(), error = function(e) NULL)
+        key <- selected_key()
+
+        avg_prices <- tibble(symbol = character(), avg_price = numeric())
+
+        if (!is.null(data) && !is.null(data$transactions)) {
+          # Get the portfolio name to find all versions in the chain
+          portfolio_name <- def$portfolio_name
+
+          # Collect all transactions from all versions of this portfolio
+          all_transactions <- tibble()
+          for (tx_key in names(data$transactions)) {
+            tx_data <- data$transactions[[tx_key]]
+            if (!is.null(tx_data) && nrow(tx_data) > 0) {
+              # Only include if it's part of the same portfolio chain
+              if (!is.null(tx_data$portfolio) && any(tx_data$portfolio == portfolio_name)) {
+                all_transactions <- dplyr::bind_rows(all_transactions, tx_data)
+              }
+            }
+          }
+
+          # Calculate weighted average purchase price for buy transactions only
+          if (nrow(all_transactions) > 0) {
+            avg_prices <- all_transactions %>%
+              dplyr::filter(action == "buy") %>%
+              dplyr::group_by(symbol) %>%
+              dplyr::summarise(
+                total_value = sum(abs(shares_change) * price, na.rm = TRUE),
+                total_shares = sum(abs(shares_change), na.rm = TRUE),
+                .groups = 'drop'
+              ) %>%
+              dplyr::mutate(avg_price = ifelse(total_shares > 0, total_value / total_shares, NA_real_)) %>%
+              dplyr::select(symbol, avg_price)
+          }
+        }
+
         target_weights_df <- target_weights_df %>%
           dplyr::left_join(latest_values, by = c("Symbol" = "symbol")) %>%
+          dplyr::left_join(avg_prices, by = c("Symbol" = "symbol")) %>%
           dplyr::mutate(
             Actual_Weight = ifelse(
               is.na(actual_weight_pct),
               "N/A",
               paste0(round(actual_weight_pct, 1), "%")
+            ),
+            Avg_Purchase_Price = ifelse(
+              is.na(avg_price) | !is.finite(avg_price),
+              "N/A",
+              sprintf("$%.2f", avg_price)
             )
           ) %>%
-          dplyr::select(Symbol, Target_Weight, Actual_Weight)
+          dplyr::select(Symbol, Target_Weight, Actual_Weight, Avg_Purchase_Price)
       }
 
       DT::datatable(
         target_weights_df,
         options = list(pageLength = 20, dom = 't'),
         rownames = FALSE,
-        colnames = c('Symbol', 'Target Weight', 'Actual Weight')
+        colnames = c('Symbol', 'Target Weight', 'Actual Weight', 'Avg Purchase Price')
       )
     })
 
