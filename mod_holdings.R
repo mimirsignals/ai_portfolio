@@ -163,6 +163,8 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
 
         target_weights_df$Actual_Weight <- "N/A"
         target_weights_df$Avg_Purchase_Price <- "N/A"
+        target_weights_df$Current_Price <- "N/A"
+        target_weights_df$Return <- "N/A"
 
       } else {
         latest_values <- portfolio_entry$individual_stocks %>%
@@ -213,10 +215,36 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
           }
         }
 
+        # Get current prices for all symbols
+        current_prices <- tibble(symbol = character(), current_price = numeric())
+
+        tryCatch({
+          # Fetch latest stock data for all symbols
+          stock_data <- fetch_stock_data(def$symbols, start_date = Sys.Date() - 7)
+
+          if (!is.null(stock_data) && nrow(stock_data) > 0) {
+            current_prices <- stock_data %>%
+              dplyr::group_by(symbol) %>%
+              dplyr::arrange(dplyr::desc(date)) %>%
+              dplyr::slice_head(n = 1) %>%
+              dplyr::ungroup() %>%
+              dplyr::select(symbol, current_price = adjusted_price)
+          }
+        }, error = function(e) {
+          warning(paste("Error fetching current prices:", e$message))
+        })
+
         target_weights_df <- target_weights_df %>%
           dplyr::left_join(latest_values, by = c("Symbol" = "symbol")) %>%
           dplyr::left_join(avg_prices, by = c("Symbol" = "symbol")) %>%
+          dplyr::left_join(current_prices, by = c("Symbol" = "symbol")) %>%
           dplyr::mutate(
+            # Calculate return percentage
+            return_pct = ifelse(
+              !is.na(avg_price) & !is.na(current_price) & is.finite(avg_price) & is.finite(current_price) & avg_price > 0,
+              ((current_price - avg_price) / avg_price) * 100,
+              NA_real_
+            ),
             Actual_Weight = ifelse(
               is.na(actual_weight_pct),
               "N/A",
@@ -226,17 +254,34 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
               is.na(avg_price) | !is.finite(avg_price),
               "N/A",
               sprintf("$%.2f", avg_price)
+            ),
+            Current_Price = ifelse(
+              is.na(current_price) | !is.finite(current_price),
+              "N/A",
+              sprintf("$%.2f", current_price)
+            ),
+            Return = ifelse(
+              is.na(return_pct) | !is.finite(return_pct),
+              "N/A",
+              sprintf("%+.1f%%", return_pct)
             )
           ) %>%
-          dplyr::select(Symbol, Target_Weight, Actual_Weight, Avg_Purchase_Price)
+          dplyr::select(Symbol, Target_Weight, Actual_Weight, Avg_Purchase_Price, Current_Price, Return)
       }
 
       DT::datatable(
         target_weights_df,
         options = list(pageLength = 20, dom = 't'),
         rownames = FALSE,
-        colnames = c('Symbol', 'Target Weight', 'Actual Weight', 'Avg Purchase Price')
-      )
+        colnames = c('Symbol', 'Target Weight', 'Actual Weight', 'Avg Purchase Price', 'Current Price', 'Return %')
+      ) %>%
+        DT::formatStyle(
+          'Return',
+          color = DT::styleInterval(
+            cuts = c(0),
+            values = c('red', 'green')
+          )
+        )
     })
 
     output$transaction_table <- DT::renderDataTable({
