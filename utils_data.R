@@ -163,7 +163,8 @@ calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_inv
             adjusted_price = as.numeric(adjusted_price),
             price_return = adjusted_price / initial_price,
             investment = as.numeric(investment * price_return),
-            daily_return = c(0, diff(log(adjusted_price)))  # Log returns
+            # First day: open to close movement, subsequent days: close to close
+            daily_return = c(log(adjusted_price[1] / initial_price), diff(log(adjusted_price)))
           ) %>%
           # Add symbol as character to avoid factor issues
           mutate(symbol = as.character(current_symbol)) %>%
@@ -231,22 +232,20 @@ calculate_weighted_portfolio <- function(stock_data, symbols, weights, total_inv
       ) %>%
       filter(!is.na(investment), is.finite(investment), investment > 0)
 
-    # CRITICAL FIX: Ensure the first row matches the exact total_investment
-    # This ensures cumulative returns always start at exactly 0%
-    # Must be done AFTER type conversion and filtering to ensure it persists
+    # CRITICAL: Verify first-day calculations
+    # Allow natural intraday movement from open to close to be captured
+    # DO NOT override the calculated values - this captures real market movement
     if (nrow(portfolio_tbl) > 0) {
       first_date <- portfolio_tbl$date[1]
-      first_investment_before <- portfolio_tbl$investment[1]
+      first_investment_calculated <- portfolio_tbl$investment[1]
 
-      portfolio_tbl[1, "investment"] <- as.numeric(total_investment)
-      portfolio_tbl[1, "daily_return"] <- 0
-
-      # Debug: Detect large discrepancies (potential data issues)
-      discrepancy_pct <- abs((first_investment_before - total_investment) / total_investment) * 100
+      # Check if calculated first-day value has large discrepancy
+      discrepancy_pct <- abs((first_investment_calculated - total_investment) / total_investment) * 100
       if (discrepancy_pct > 5) {
-        message(sprintf("WARNING: Large discrepancy in first day calculation for %s: expected %.2f, calculated %.2f (%.1f%% diff)",
-                        first_date, total_investment, first_investment_before, discrepancy_pct))
+        message(sprintf("INFO: First-day intraday movement for %s: baseline %.2f, end-of-day %.2f (%.1f%% diff)",
+                        first_date, total_investment, first_investment_calculated, discrepancy_pct))
       }
+      # DO NOT override - let natural calculation stand to capture intraday movement
     }
     
     if (nrow(portfolio_tbl) == 0) {

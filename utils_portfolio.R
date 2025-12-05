@@ -149,7 +149,7 @@ calculate_all_portfolios_with_inheritance <- function(portfolios, selected_portf
           prev_holdings = tibble::tibble(symbol = character(), investment = numeric(), date = as.Date(character())),
           target_values = target_values,
           total_value = as.numeric(def$total_investment),
-          price_lookup = fetch_prices_on_or_before(names(target_values), start_date)
+          price_lookup = fetch_prices_on_or_after(names(target_values), start_date)
         )
 
         previous_key <- key
@@ -262,16 +262,16 @@ run_rebalance_segment <- function(current_def, previous_entry, portfolio_key) {
   target_values <- compute_target_values(current_def$symbols, current_def$weights, total_investment)
   if (length(target_values) == 0) return(NULL)
 
-  price_lookup <- fetch_prices_on_or_before(
+  price_lookup <- fetch_prices_on_or_after(
     symbols = unique(c(names(target_values), previous_holdings$symbol)),
-    cutoff_date = price_reference_date
+    cutoff_date = rebalance_date
   )
 
   transactions <- build_transaction_log(
     portfolio_name = portfolio_label,
     portfolio_key = portfolio_key,
     rebalance_date = rebalance_date,
-    price_date = price_reference_date,
+    price_date = rebalance_date,
     prev_holdings = previous_holdings,
     target_values = target_values,
     total_value = total_investment,
@@ -382,24 +382,24 @@ extract_holdings_at_date <- function(individual_stocks, cutoff_date) {
     dplyr::ungroup()
 }
 
-fetch_prices_on_or_before <- function(symbols, cutoff_date) {
+fetch_prices_on_or_after <- function(symbols, cutoff_date) {
   symbols <- unique(as.character(symbols))
   if (length(symbols) == 0) return(setNames(numeric(0), character(0)))
 
   cutoff_date <- as.Date(cutoff_date)
-  start_fetch <- cutoff_date - 30
+  end_fetch <- cutoff_date + 10  # Look forward 10 days to find next trading day
 
-  price_data <- fetch_stock_data(symbols, start_fetch)
+  price_data <- fetch_stock_data(symbols, cutoff_date)
   if (is.null(price_data) || nrow(price_data) == 0) {
     return(setNames(rep(NA_real_, length(symbols)), symbols))
   }
 
   price_tbl <- price_data %>%
     dplyr::mutate(date = as.Date(date)) %>%
-    dplyr::filter(date <= cutoff_date) %>%
+    dplyr::filter(date >= cutoff_date, date <= end_fetch) %>%
     dplyr::arrange(date) %>%
     dplyr::group_by(symbol) %>%
-    dplyr::slice_tail(n = 1) %>%
+    dplyr::slice_head(n = 1) %>%  # First available date on or after cutoff
     dplyr::ungroup()
 
   # Use opening price for rebalancing (executes at market open)
@@ -539,47 +539,83 @@ build_rebalanced_segment <- function(symbols, weights, total_investment, rebalan
     performance <- calculate_weighted_portfolio(future_data, symbols, weights, total_investment)
   }
 
-  # Create the rebalance baseline row with the inherited value
-  portfolio_row <- tibble::tibble(
-    date = as.Date(rebalance_date),
-    investment = total_investment,
-    daily_return = 0
-  )
-
+  # Check if performance data starts on rebalance date
   if (!is.null(performance) && !is.null(performance$portfolio_tbl) && nrow(performance$portfolio_tbl) > 0) {
-    # Always prepend the rebalance row, then remove duplicates
-    # This ensures the rebalance value (total_investment) takes precedence
-    portfolio_tbl <- dplyr::bind_rows(portfolio_row, performance$portfolio_tbl) %>%
-      dplyr::mutate(
-        date = as.Date(date),
-        investment = as.numeric(investment),
-        daily_return = as.numeric(daily_return)
-      ) %>%
-      dplyr::arrange(date) %>%
-      dplyr::distinct(date, .keep_all = TRUE)
+    first_date <- min(performance$portfolio_tbl$date)
+
+    if (first_date == as.Date(rebalance_date)) {
+      # Data starts on rebalance date - use it directly (includes intraday movement)
+      portfolio_tbl <- performance$portfolio_tbl %>%
+        dplyr::mutate(
+          date = as.Date(date),
+          investment = as.numeric(investment),
+          daily_return = as.numeric(daily_return)
+        ) %>%
+        dplyr::arrange(date)
+    } else {
+      # Data starts after rebalance date (weekend/holiday) - prepend baseline row
+      portfolio_row <- tibble::tibble(
+        date = as.Date(rebalance_date),
+        investment = total_investment,
+        daily_return = 0
+      )
+      portfolio_tbl <- dplyr::bind_rows(portfolio_row, performance$portfolio_tbl) %>%
+        dplyr::mutate(
+          date = as.Date(date),
+          investment = as.numeric(investment),
+          daily_return = as.numeric(daily_return)
+        ) %>%
+        dplyr::arrange(date) %>%
+        dplyr::distinct(date, .keep_all = TRUE)
+    }
   } else {
-    # No performance data - just use the rebalance row
+    # No performance data - baseline row only
+    portfolio_row <- tibble::tibble(
+      date = as.Date(rebalance_date),
+      investment = total_investment,
+      daily_return = 0
+    )
     portfolio_tbl <- portfolio_row
   }
 
   # Handle individual stocks similarly
-  individual_rows <- tibble::tibble(
-    date = rep(as.Date(rebalance_date), length(symbols)),
-    symbol = symbols,
-    investment = target_values,
-    daily_return = 0
-  )
-
   if (!is.null(performance) && !is.null(performance$individual_stocks) && nrow(performance$individual_stocks) > 0) {
-    individual_tbl <- dplyr::bind_rows(individual_rows, performance$individual_stocks) %>%
-      dplyr::mutate(
-        date = as.Date(date),
-        investment = as.numeric(investment),
-        daily_return = as.numeric(daily_return)
-      ) %>%
-      dplyr::arrange(date, symbol) %>%
-      dplyr::distinct(date, symbol, .keep_all = TRUE)
+    first_date <- min(performance$individual_stocks$date)
+
+    if (first_date == as.Date(rebalance_date)) {
+      # Use natural calculations including intraday movement
+      individual_tbl <- performance$individual_stocks %>%
+        dplyr::mutate(
+          date = as.Date(date),
+          investment = as.numeric(investment),
+          daily_return = as.numeric(daily_return)
+        ) %>%
+        dplyr::arrange(date, symbol)
+    } else {
+      # Prepend baseline for rebalance date
+      individual_rows <- tibble::tibble(
+        date = rep(as.Date(rebalance_date), length(symbols)),
+        symbol = symbols,
+        investment = target_values,
+        daily_return = 0
+      )
+      individual_tbl <- dplyr::bind_rows(individual_rows, performance$individual_stocks) %>%
+        dplyr::mutate(
+          date = as.Date(date),
+          investment = as.numeric(investment),
+          daily_return = as.numeric(daily_return)
+        ) %>%
+        dplyr::arrange(date, symbol) %>%
+        dplyr::distinct(date, symbol, .keep_all = TRUE)
+    }
   } else {
+    # No performance - baseline only
+    individual_rows <- tibble::tibble(
+      date = rep(as.Date(rebalance_date), length(symbols)),
+      symbol = symbols,
+      investment = target_values,
+      daily_return = 0
+    )
     individual_tbl <- individual_rows
   }
 
