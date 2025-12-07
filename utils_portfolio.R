@@ -1,5 +1,20 @@
 # R/utils_portfolio.R
 
+#' Adjust a date to the next trading day (Monday) if it falls on a weekend
+#' @param date Date to adjust
+#' @return Adjusted date (Monday if input was Saturday/Sunday, otherwise unchanged)
+adjust_to_trading_day <- function(date) {
+  date <- as.Date(date)
+  weekday <- lubridate::wday(date)  # 1 = Sunday, 7 = Saturday
+
+  if (weekday == 7) {  # Saturday -> Monday
+    return(date + 2)
+  } else if (weekday == 1) {  # Sunday -> Monday
+    return(date + 1)
+  }
+  return(date)
+}
+
 #' Main calculation function for selected portfolios and benchmarks
 calculate_all_portfolios <- function(portfolios, selected_portfolios, show_sp500 = TRUE, show_btc = TRUE) {
   if (length(portfolios) == 0 || length(selected_portfolios) == 0) return(NULL)
@@ -10,10 +25,12 @@ calculate_all_portfolios <- function(portfolios, selected_portfolios, show_sp500
   for (name in selected_portfolios) {
     if (name %in% names(portfolios)) {
       p_def <- portfolios[[name]]
-      earliest_date <- min(earliest_date, p_def$start_date)
-      
+      # Adjust to next trading day if start date falls on weekend
+      trading_date <- adjust_to_trading_day(as.Date(p_def$start_date))
+      earliest_date <- min(earliest_date, trading_date)
+
       perf_data <- run_portfolio_calculations(
-        p_def$symbols, p_def$weights, p_def$start_date, p_def$total_investment, name
+        p_def$symbols, p_def$weights, trading_date, p_def$total_investment, name
       )
       
       if (!is.null(perf_data)) {
@@ -32,12 +49,12 @@ calculate_all_portfolios <- function(portfolios, selected_portfolios, show_sp500
   fetch_benchmark <- function(symbol, start) {
     raw_data <- fetch_stock_data(symbol, start_date = start)
     if (is.null(raw_data) || nrow(raw_data) == 0) return(NULL)
-    
-    # Calculate cumulative return for the benchmark
-    initial_price <- raw_data$adjusted_price[1]
+
+    # Use opening price on first day for fair comparison with portfolio
+    initial_price <- raw_data$open_price[1]
     raw_data <- raw_data %>%
       dplyr::mutate(cumulative_return = (adjusted_price / initial_price) - 1)
-      
+
     list(dates = raw_data$date, cumulative_returns = raw_data$cumulative_return)
   }
 
@@ -83,11 +100,13 @@ calculate_all_portfolios_with_inheritance <- function(portfolios, selected_portf
     for (key in chain_keys) {
       def <- portfolios[[key]]
       start_date <- as.Date(def$start_date)
-      earliest_start <- min(earliest_start, start_date, na.rm = TRUE)
+      # Adjust to next trading day if start date falls on weekend
+      trading_date <- adjust_to_trading_day(start_date)
+      earliest_start <- min(earliest_start, trading_date, na.rm = TRUE)
       portfolio_label <- if (!is.null(def$portfolio_name)) def$portfolio_name else key
 
       if (is.null(previous_key)) {
-        base_result <- run_portfolio_calculations(def$symbols, def$weights, start_date, def$total_investment, key)
+        base_result <- run_portfolio_calculations(def$symbols, def$weights, trading_date, def$total_investment, key)
         if (is.null(base_result)) {
           warning(paste("Could not calculate base portfolio for", key))
           next
@@ -144,12 +163,12 @@ calculate_all_portfolios_with_inheritance <- function(portfolios, selected_portf
         transaction_records[[key]] <- build_transaction_log(
           portfolio_name = portfolio_label,
           portfolio_key = key,
-          rebalance_date = start_date,
-          price_date = start_date,
+          rebalance_date = trading_date,  # Use actual trading date
+          price_date = trading_date,
           prev_holdings = tibble::tibble(symbol = character(), investment = numeric(), date = as.Date(character())),
           target_values = target_values,
           total_value = as.numeric(def$total_investment),
-          price_lookup = fetch_prices_on_or_after(names(target_values), start_date)
+          price_lookup = fetch_prices_on_or_after(names(target_values), trading_date)
         )
 
         previous_key <- key
@@ -191,7 +210,8 @@ calculate_all_portfolios_with_inheritance <- function(portfolios, selected_portf
     raw_data <- fetch_stock_data(symbol, start_date = start)
     if (is.null(raw_data) || nrow(raw_data) == 0) return(NULL)
 
-    initial_price <- raw_data$adjusted_price[1]
+    # Use opening price on first day for fair comparison with portfolio
+    initial_price <- raw_data$open_price[1]
     raw_data <- raw_data %>%
       dplyr::mutate(cumulative_return = (adjusted_price / initial_price) - 1)
 
@@ -248,14 +268,30 @@ compute_target_values <- function(symbols, weights, total_investment) {
 
 run_rebalance_segment <- function(current_def, previous_entry, portfolio_key) {
   rebalance_date <- as.Date(current_def$start_date)
-  snapshot <- get_latest_portfolio_snapshot(previous_entry$portfolio_tbl, rebalance_date)
-  if (is.null(snapshot)) return(NULL)
+  # Adjust to next trading day if rebalance falls on weekend
+  trading_date <- adjust_to_trading_day(rebalance_date)
 
-  total_investment <- as.numeric(snapshot$investment)
-  if (!is.finite(total_investment) || total_investment <= 0) return(NULL)
-
-  price_reference_date <- as.Date(snapshot$date)
   portfolio_label <- if (!is.null(current_def$portfolio_name)) current_def$portfolio_name else portfolio_key
+
+  # Calculate portfolio value at market open on trading_date
+
+  # This accounts for overnight/weekend price gaps
+  total_investment <- calculate_value_at_open(previous_entry$individual_stocks, trading_date)
+
+  # Fallback to snapshot if calculate_value_at_open fails
+  if (is.na(total_investment) || !is.finite(total_investment) || total_investment <= 0) {
+    snapshot <- get_latest_portfolio_snapshot(previous_entry$portfolio_tbl, rebalance_date)
+    if (is.null(snapshot)) return(NULL)
+    total_investment <- as.numeric(snapshot$investment)
+    if (!is.finite(total_investment) || total_investment <= 0) return(NULL)
+    price_reference_date <- as.Date(snapshot$date)
+  } else {
+    # Get the last trading day before execution for holdings reference
+    prev_holdings_data <- previous_entry$individual_stocks %>%
+      dplyr::mutate(date = as.Date(date)) %>%
+      dplyr::filter(date < trading_date)
+    price_reference_date <- if (nrow(prev_holdings_data) > 0) max(prev_holdings_data$date) else trading_date - 1
+  }
 
   previous_holdings <- extract_holdings_at_date(previous_entry$individual_stocks, price_reference_date)
 
@@ -264,14 +300,14 @@ run_rebalance_segment <- function(current_def, previous_entry, portfolio_key) {
 
   price_lookup <- fetch_prices_on_or_after(
     symbols = unique(c(names(target_values), previous_holdings$symbol)),
-    cutoff_date = rebalance_date
+    cutoff_date = trading_date
   )
 
   transactions <- build_transaction_log(
     portfolio_name = portfolio_label,
     portfolio_key = portfolio_key,
-    rebalance_date = rebalance_date,
-    price_date = rebalance_date,
+    rebalance_date = trading_date,  # Use actual trading date
+    price_date = trading_date,
     prev_holdings = previous_holdings,
     target_values = target_values,
     total_value = total_investment,
@@ -414,6 +450,98 @@ fetch_prices_on_or_after <- function(symbols, cutoff_date) {
   prices[symbols]
 }
 
+#' Fetch closing prices for symbols on a specific date
+#' @param symbols Vector of stock symbols
+#' @param target_date The date to get closing prices for
+#' @return Named numeric vector of closing prices
+fetch_closing_prices <- function(symbols, target_date) {
+  symbols <- unique(as.character(symbols))
+  symbols <- symbols[!is.na(symbols) & symbols != "" & toupper(symbols) != "CASH"]
+  if (length(symbols) == 0) return(setNames(numeric(0), character(0)))
+
+  target_date <- as.Date(target_date)
+
+  # Fetch data starting a few days before to ensure we have the target date
+  price_data <- fetch_stock_data(symbols, target_date - 5)
+  if (is.null(price_data) || nrow(price_data) == 0) {
+    return(setNames(rep(NA_real_, length(symbols)), symbols))
+  }
+
+  price_tbl <- price_data %>%
+    dplyr::filter(date == target_date) %>%
+    dplyr::group_by(symbol) %>%
+    dplyr::slice_head(n = 1) %>%
+    dplyr::ungroup()
+
+  prices <- price_tbl$adjusted_price
+  names(prices) <- price_tbl$symbol
+
+  missing_symbols <- setdiff(symbols, names(prices))
+  if (length(missing_symbols) > 0) {
+    prices <- c(prices, setNames(rep(NA_real_, length(missing_symbols)), missing_symbols))
+  }
+
+  prices[symbols]
+}
+
+#' Calculate portfolio value at market open on execution date
+#' @param individual_stocks Data frame of individual stock holdings
+#' @param execution_date The date trades will be executed
+#' @return Total portfolio value at market open
+calculate_value_at_open <- function(individual_stocks, execution_date) {
+  if (is.null(individual_stocks) || nrow(individual_stocks) == 0) return(NA_real_)
+
+  execution_date <- as.Date(execution_date)
+
+  # Get the most recent holdings before execution date
+  prev_holdings <- individual_stocks %>%
+    dplyr::mutate(date = as.Date(date)) %>%
+    dplyr::filter(date < execution_date) %>%
+    dplyr::group_by(symbol) %>%
+    dplyr::slice_tail(n = 1) %>%
+    dplyr::ungroup()
+
+  if (nrow(prev_holdings) == 0) return(NA_real_)
+
+  # Get the date of these holdings (should be the previous trading day)
+  prev_date <- max(prev_holdings$date)
+
+  # Separate cash and non-cash holdings
+  cash_holdings <- prev_holdings %>% dplyr::filter(toupper(symbol) == "CASH")
+  stock_holdings <- prev_holdings %>% dplyr::filter(toupper(symbol) != "CASH")
+
+  total_value <- sum(cash_holdings$investment, na.rm = TRUE)
+
+  if (nrow(stock_holdings) == 0) return(total_value)
+
+  symbols <- unique(stock_holdings$symbol)
+
+  # Fetch closing prices from prev_date to back-calculate shares
+  prev_close_prices <- fetch_closing_prices(symbols, prev_date)
+  # Fetch opening prices on execution date
+  open_prices <- fetch_prices_on_or_after(symbols, execution_date)
+
+  for (i in seq_len(nrow(stock_holdings))) {
+    sym <- stock_holdings$symbol[i]
+    investment <- as.numeric(stock_holdings$investment[i])
+
+    prev_close <- prev_close_prices[sym]
+    monday_open <- open_prices[sym]
+
+    if (!is.na(prev_close) && !is.na(monday_open) && prev_close > 0) {
+      # Back-calculate shares from Friday's investment and closing price
+      shares <- investment / prev_close
+      # Value at Monday's open
+      total_value <- total_value + (shares * monday_open)
+    } else {
+      # Fallback: use the investment value as-is
+      total_value <- total_value + investment
+    }
+  }
+
+  total_value
+}
+
 build_transaction_log <- function(portfolio_name, portfolio_key, rebalance_date, price_date, prev_holdings, target_values, total_value, price_lookup) {
   prev_df <- prev_holdings %>%
     dplyr::transmute(
@@ -510,27 +638,30 @@ build_rebalanced_segment <- function(symbols, weights, total_investment, rebalan
 
   target_values <- total_investment * weights
 
-  stock_data <- fetch_stock_data(symbols, rebalance_date)
+  # Adjust rebalance date to next trading day if it falls on weekend
+  trading_date <- adjust_to_trading_day(as.Date(rebalance_date))
+
+  stock_data <- fetch_stock_data(symbols, trading_date)
   future_data <- NULL
   if (!is.null(stock_data) && nrow(stock_data) > 0) {
     future_data <- stock_data %>%
       dplyr::mutate(date = as.Date(date)) %>%
-      dplyr::filter(date >= rebalance_date)
+      dplyr::filter(date >= trading_date)
   }
 
   performance <- NULL
   if (!is.null(future_data) && nrow(future_data) > 0) {
-    # Check if we have data for all symbols on or near the rebalance date
+    # Check if we have data for all symbols on or near the trading date
     earliest_by_symbol <- future_data %>%
       dplyr::group_by(symbol) %>%
       dplyr::summarise(first_date = min(date), .groups = 'drop')
 
-    missing_rebalance_date <- !all(earliest_by_symbol$first_date <= rebalance_date)
+    missing_trading_date <- !all(earliest_by_symbol$first_date <= trading_date)
 
-    if (missing_rebalance_date) {
-      max_delay <- max(earliest_by_symbol$first_date) - as.Date(rebalance_date)
-      message(sprintf("DEBUG build_rebalanced_segment: rebalance_date=%s, max_delay=%d days",
-                      rebalance_date, as.numeric(max_delay)))
+    if (missing_trading_date) {
+      max_delay <- max(earliest_by_symbol$first_date) - trading_date
+      message(sprintf("DEBUG build_rebalanced_segment: trading_date=%s, max_delay=%d days",
+                      trading_date, as.numeric(max_delay)))
       for (i in seq_len(nrow(earliest_by_symbol))) {
         message(sprintf("  - %s: first_date=%s", earliest_by_symbol$symbol[i], earliest_by_symbol$first_date[i]))
       }
@@ -539,84 +670,42 @@ build_rebalanced_segment <- function(symbols, weights, total_investment, rebalan
     performance <- calculate_weighted_portfolio(future_data, symbols, weights, total_investment)
   }
 
-  # Check if performance data starts on rebalance date
+  # Use performance data directly - it should start on the trading date
+  # No need to prepend weekend dates anymore since we adjusted to trading day
   if (!is.null(performance) && !is.null(performance$portfolio_tbl) && nrow(performance$portfolio_tbl) > 0) {
-    first_date <- min(performance$portfolio_tbl$date)
-
-    if (first_date == as.Date(rebalance_date)) {
-      # Data starts on rebalance date - use it directly (includes intraday movement)
-      portfolio_tbl <- performance$portfolio_tbl %>%
-        dplyr::mutate(
-          date = as.Date(date),
-          investment = as.numeric(investment),
-          daily_return = as.numeric(daily_return)
-        ) %>%
-        dplyr::arrange(date)
-    } else {
-      # Data starts after rebalance date (weekend/holiday) - prepend baseline row
-      portfolio_row <- tibble::tibble(
-        date = as.Date(rebalance_date),
-        investment = total_investment,
-        daily_return = 0
-      )
-      portfolio_tbl <- dplyr::bind_rows(portfolio_row, performance$portfolio_tbl) %>%
-        dplyr::mutate(
-          date = as.Date(date),
-          investment = as.numeric(investment),
-          daily_return = as.numeric(daily_return)
-        ) %>%
-        dplyr::arrange(date) %>%
-        dplyr::distinct(date, .keep_all = TRUE)
-    }
+    portfolio_tbl <- performance$portfolio_tbl %>%
+      dplyr::mutate(
+        date = as.Date(date),
+        investment = as.numeric(investment),
+        daily_return = as.numeric(daily_return)
+      ) %>%
+      dplyr::arrange(date)
   } else {
-    # No performance data - baseline row only
-    portfolio_row <- tibble::tibble(
-      date = as.Date(rebalance_date),
+    # No performance data - baseline row on trading date only
+    portfolio_tbl <- tibble::tibble(
+      date = trading_date,
       investment = total_investment,
       daily_return = 0
     )
-    portfolio_tbl <- portfolio_row
   }
 
   # Handle individual stocks similarly
   if (!is.null(performance) && !is.null(performance$individual_stocks) && nrow(performance$individual_stocks) > 0) {
-    first_date <- min(performance$individual_stocks$date)
-
-    if (first_date == as.Date(rebalance_date)) {
-      # Use natural calculations including intraday movement
-      individual_tbl <- performance$individual_stocks %>%
-        dplyr::mutate(
-          date = as.Date(date),
-          investment = as.numeric(investment),
-          daily_return = as.numeric(daily_return)
-        ) %>%
-        dplyr::arrange(date, symbol)
-    } else {
-      # Prepend baseline for rebalance date
-      individual_rows <- tibble::tibble(
-        date = rep(as.Date(rebalance_date), length(symbols)),
-        symbol = symbols,
-        investment = target_values,
-        daily_return = 0
-      )
-      individual_tbl <- dplyr::bind_rows(individual_rows, performance$individual_stocks) %>%
-        dplyr::mutate(
-          date = as.Date(date),
-          investment = as.numeric(investment),
-          daily_return = as.numeric(daily_return)
-        ) %>%
-        dplyr::arrange(date, symbol) %>%
-        dplyr::distinct(date, symbol, .keep_all = TRUE)
-    }
+    individual_tbl <- performance$individual_stocks %>%
+      dplyr::mutate(
+        date = as.Date(date),
+        investment = as.numeric(investment),
+        daily_return = as.numeric(daily_return)
+      ) %>%
+      dplyr::arrange(date, symbol)
   } else {
-    # No performance - baseline only
-    individual_rows <- tibble::tibble(
-      date = rep(as.Date(rebalance_date), length(symbols)),
+    # No performance - baseline on trading date only
+    individual_tbl <- tibble::tibble(
+      date = rep(trading_date, length(symbols)),
       symbol = symbols,
       investment = target_values,
       daily_return = 0
     )
-    individual_tbl <- individual_rows
   }
 
   list(

@@ -239,29 +239,31 @@ holdingsServer <- function(id, portfolios_reactive, selection_state, portfolio_d
           dplyr::left_join(avg_prices, by = c("Symbol" = "symbol")) %>%
           dplyr::left_join(current_prices, by = c("Symbol" = "symbol")) %>%
           dplyr::mutate(
-            # Calculate return percentage
+            is_cash = toupper(Symbol) == "CASH",
+            # Calculate return percentage (not applicable for cash)
             return_pct = ifelse(
-              !is.na(avg_price) & !is.na(current_price) & is.finite(avg_price) & is.finite(current_price) & avg_price > 0,
-              ((current_price - avg_price) / avg_price) * 100,
-              NA_real_
+              is_cash | is.na(avg_price) | is.na(current_price) | !is.finite(avg_price) | !is.finite(current_price) | avg_price <= 0,
+              NA_real_,
+              ((current_price - avg_price) / avg_price) * 100
             ),
             Actual_Weight = ifelse(
               is.na(actual_weight_pct),
               "N/A",
               paste0(round(actual_weight_pct, 1), "%")
             ),
+            # Cash doesn't have purchase price or current price
             Avg_Purchase_Price = ifelse(
-              is.na(avg_price) | !is.finite(avg_price),
+              is_cash | is.na(avg_price) | !is.finite(avg_price),
               "N/A",
               sprintf("$%.2f", avg_price)
             ),
             Current_Price = ifelse(
-              is.na(current_price) | !is.finite(current_price),
+              is_cash | is.na(current_price) | !is.finite(current_price),
               "N/A",
               sprintf("$%.2f", current_price)
             ),
             Return = ifelse(
-              is.na(return_pct) | !is.finite(return_pct),
+              is_cash | is.na(return_pct) | !is.finite(return_pct),
               "N/A",
               sprintf("%+.1f%%", return_pct)
             )
